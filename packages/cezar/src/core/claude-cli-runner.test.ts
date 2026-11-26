@@ -18,10 +18,12 @@ import {
   claudeExitMessage,
   claudeMcpServers,
   writeClaudeSettingsFile,
+  withClaudeSandbox,
   EOF_KILL_GRACE_MS,
   EOF_TERM_GRACE_MS,
   KILL_GRACE_MS,
 } from './claude-cli-runner.ts';
+import { claudeSandboxSettings } from './claude-sandbox.ts';
 import { recordOwnSignal, resetOwnSignalsForTests } from './process-signals.ts';
 import { ClaudeSessionCost, resetClaudeSessionCosts } from './claude-session-cost.ts';
 import type { UiEvent } from './ui-events.ts';
@@ -38,6 +40,14 @@ vi.mock('node:child_process', async (importOriginal) => {
     spawn: (...args: Parameters<typeof actual.spawn>) =>
       spawnHook.override ? spawnHook.override() : actual.spawn(...args),
   };
+});
+
+// The suites below pin settings shapes; the default OS sandbox has its own suite at the end.
+beforeEach(() => {
+  vi.stubEnv('CEZ_AGENT_SANDBOX', '0');
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 /**
@@ -644,10 +654,14 @@ describe('ClaudeCliRunner connectors (spec 2026-11-12-manager-connectors)', () =
 
   it('passes --settings as a path, never the JSON, and only when settings are given', () => {
     const settings = { hooks: { PreToolUse: [] } };
-    const args = buildClaudeArgs({ userPrompt: 'x', cwd: '/', claudeSettings: settings }, {}, undefined, undefined, '/tmp/s.json');
+    const off = { CEZ_AGENT_SANDBOX: '0' };
+    const args = buildClaudeArgs({ userPrompt: 'x', cwd: '/', claudeSettings: settings }, off, undefined, undefined, '/tmp/s.json');
     expect(args.slice(args.indexOf('--settings'), args.indexOf('--settings') + 2)).toEqual(['--settings', '/tmp/s.json']);
     expect(args.join(' ')).not.toContain('PreToolUse');
-    expect(buildClaudeArgs({ userPrompt: 'x', cwd: '/' }, {}, undefined, undefined, '/tmp/s.json')).not.toContain('--settings');
+    expect(buildClaudeArgs({ userPrompt: 'x', cwd: '/' }, off, undefined, undefined, '/tmp/s.json')).not.toContain('--settings');
+    // With the sandbox on, a fence file still means exactly one --settings: the sandbox rides inside it.
+    const fenced = buildClaudeArgs({ userPrompt: 'x', cwd: '/', claudeSettings: settings }, {}, undefined, undefined, '/tmp/s.json');
+    expect(fenced.filter((arg) => arg === '--settings')).toEqual(['--settings']);
   });
 
   it('writes the settings to a 0600 file its cleanup removes', () => {
@@ -739,4 +753,62 @@ console.log(${JSON.stringify(result(1.25, 30))});
     // The session is now known: a resume in this process diffs against its last total.
     expect(new ClaudeSessionCost('unpinned-1', true, dir, undefined).increment(2)).toBeCloseTo(0.75);
   }, 15_000);
+});
+
+describe('default OS sandbox for Claude Bash', () => {
+  const spec = { userPrompt: 'go', cwd: '/tmp', allowedTools: ['Read', 'Bash'] };
+  const settingsOf = (args: string[]) => JSON.parse(args[args.indexOf('--settings') + 1]!) as Record<string, any>;
+  const home = '/home/dev';
+  const on: NodeJS.ProcessEnv = { HOME: home };
+
+  it('is on by default: fail-closed, no unsandboxed retry, credential stores unreadable', () => {
+    const settings = claudeSandboxSettings(on, { home, platform: 'linux', exists: () => true })!;
+    expect(settings.sandbox).toMatchObject({ enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false });
+    expect(settings.sandbox.filesystem.denyRead).toEqual(expect.arrayContaining([`${home}/.ssh`, `${home}/.aws`, `${home}/.cezar`, `${home}/.config/gh`]));
+    expect(settings.permissions.deny).toEqual(expect.arrayContaining([`Read(/${home}/.ssh/**)`, `Read(/${home}/.netrc)`]));
+    expect(settings.sandbox.network.allowedDomains).toEqual(expect.arrayContaining(['registry.npmjs.org', '127.0.0.1']));
+    expect(settings.sandbox.network.allowedDomains).not.toContain('example.com');
+  });
+
+  it('turns off with CEZ_AGENT_SANDBOX=0 and on native Windows', () => {
+    expect(claudeSandboxSettings({ CEZ_AGENT_SANDBOX: '0' }, { platform: 'linux' })).toBeUndefined();
+    expect(claudeSandboxSettings({ CEZ_AGENT_SANDBOX: 'false' }, { platform: 'linux' })).toBeUndefined();
+    expect(claudeSandboxSettings({}, { platform: 'win32' })).toBeUndefined();
+  });
+
+  it('extends domains, deny-read and writable paths from env; grants only existing caches', () => {
+    const settings = claudeSandboxSettings(
+      { CEZ_AGENT_SANDBOX_DOMAINS: 'api.example.com, *.corp.test', CEZ_AGENT_SANDBOX_DENY_READ: '/srv/secrets', CEZ_AGENT_SANDBOX_ALLOW_WRITE: '/data/out' },
+      { home, platform: 'darwin', exists: (p) => p === `${home}/.npm` || p === '/data/out' },
+    )!;
+    expect(settings.sandbox.network.allowedDomains).toEqual(expect.arrayContaining(['api.example.com', '*.corp.test']));
+    expect(settings.sandbox.filesystem.denyRead).toContain('/srv/secrets');
+    expect(settings.sandbox.filesystem.allowWrite).toEqual([`${home}/.npm`, '/data/out']);
+  });
+
+  it('CEZ_AGENT_GH_TOKEN=1 also lifts the ~/.config/gh read denial', () => {
+    const settings = claudeSandboxSettings({ CEZ_AGENT_GH_TOKEN: '1' }, { home, platform: 'linux' })!;
+    expect(settings.sandbox.filesystem.denyRead).not.toContain(`${home}/.config/gh`);
+    expect(settings.sandbox.filesystem.denyRead).toContain(`${home}/.ssh`);
+  });
+
+  it('rides inline in --settings, merged with the hook and the excluded commands', () => {
+    const args = buildClaudeArgs({ ...spec, bashHookCommand: 'h', sandboxExcludedCommands: ['cez-manager *'] }, on);
+    expect(args.filter((arg) => arg === '--settings')).toHaveLength(1);
+    const settings = settingsOf(args);
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe('h');
+    expect(settings.sandbox).toMatchObject({ enabled: true, excludedCommands: ['cez-manager *'] });
+    expect(settings.permissions.deny.length).toBeGreaterThan(0);
+    expect(settingsOf(buildClaudeArgs(spec, on)).sandbox.enabled).toBe(true);
+    expect(buildClaudeArgs(spec, { CEZ_AGENT_SANDBOX: '0' })).not.toContain('--settings');
+  });
+
+  it('merges into a fence file without dropping the caller deny rules', () => {
+    const merged = withClaudeSandbox({ permissions: { deny: ['Bash'] }, hooks: { x: 1 } }, on) as Record<string, any>;
+    expect(merged.hooks).toEqual({ x: 1 });
+    expect(merged.permissions.deny[0]).toBe('Bash');
+    expect(merged.permissions.deny.length).toBeGreaterThan(1);
+    expect(merged.sandbox.enabled).toBe(true);
+    expect(withClaudeSandbox({ a: 1 }, { CEZ_AGENT_SANDBOX: '0' })).toEqual({ a: 1 });
+  });
 });

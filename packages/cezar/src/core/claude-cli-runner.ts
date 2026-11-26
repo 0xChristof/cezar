@@ -21,6 +21,7 @@ export type { AgentSession, SessionOptions } from './agent-runner.ts';
 import { isSignalTerminationExit, trackChildExit } from './agent-runner.ts';
 import { unwrapJsonErrorEnvelope } from './agent-errors.ts';
 import { buildChildEnv } from './agent-env.ts';
+import { claudeSandboxSettings } from './claude-sandbox.ts';
 import { holdForOwnShutdown, ownShutdownExitMessage, ownSignalBehindExit, receivedOwnSignalSince, watchOwnSignals } from './process-signals.ts';
 import { disclaimedCommand } from './disclaim-spawn.ts';
 import { resolveClaudeBin } from './claude-bin.ts';
@@ -129,7 +130,8 @@ export class ClaudeCliRunner implements AgentRunner {
   ): AgentSession {
     const mcpConfig = writeClaudeMcpConfig(spec.mcpServers);
     const promptFile = writeClaudeSystemPromptFile(appendClaudeSystemPrompt(spec.systemPrompt));
-    const settingsFile = writeClaudeSettingsFile(spec.claudeSettings);
+    // One `--settings` flag only: the OS sandbox rides inside the fence file when there is one.
+    const settingsFile = writeClaudeSettingsFile(spec.claudeSettings && withClaudeSandbox(spec.claudeSettings, process.env));
     // A fence that could not be written must not run unfenced.
     if (spec.claudeSettings && !settingsFile) {
       mcpConfig?.cleanup();
@@ -513,8 +515,10 @@ export function buildClaudeArgs(
   const sandbox = spec.sandboxExcludedCommands?.length && bashAllowed
     ? { sandbox: { excludedCommands: spec.sandboxExcludedCommands } }
     : {};
-  if (Object.keys(hook).length > 0 || Object.keys(sandbox).length > 0) {
-    args.push('--settings', JSON.stringify({ ...hook, ...sandbox }));
+  const fenceFile = settingsPath && spec.claudeSettings;
+  const inline = fenceFile ? { ...hook, ...sandbox } : withClaudeSandbox({ ...hook, ...sandbox }, env);
+  if (Object.keys(inline).length > 0) {
+    args.push('--settings', JSON.stringify(inline));
   }
   // Settings allow rules widen `--allowedTools`; only a deny rule outranks them.
   const disallowed = [...(spec.enforceReadOnly ? CLAUDE_WRITE_TOOLS : []), ...claudeReadOnlyPathRules(spec.readOnlyPaths)];
@@ -544,6 +548,23 @@ export function claudeMcpServers(msg: unknown): Extract<AgentEvent, { type: 'mcp
   });
   const tools = (Array.isArray(raw.tools) ? raw.tools : []).filter((tool: unknown): tool is string => typeof tool === 'string');
   return { type: 'mcp-servers', servers, tools };
+}
+
+/** `settings` plus the default OS sandbox (`claude-sandbox.ts`); caller keys win, deny rules add up. */
+export function withClaudeSandbox(settings: Record<string, unknown>, env: NodeJS.ProcessEnv): Record<string, unknown> {
+  const os = claudeSandboxSettings(env);
+  if (!os) return settings;
+  const own = (key: string): Record<string, unknown> => {
+    const value = settings[key];
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  };
+  const permissions = own('permissions');
+  const deny = Array.isArray(permissions.deny) ? permissions.deny : [];
+  return {
+    ...settings,
+    sandbox: { ...os.sandbox, ...own('sandbox') },
+    permissions: { ...permissions, deny: [...deny, ...os.permissions.deny] },
+  };
 }
 
 /** `AgentRunSpec.claudeSettings` in a `0600` temp file for `--settings`: a hook command stays out of `ps`. */
