@@ -23,7 +23,7 @@ const item = {
   id: 1, node_id: 'I_one', number: 7, title: 'A\u0000 title',
   html_url: 'https://github.com/acme/demo/issues/7',
   created_at: '2026-07-26T01:00:00.000Z', updated_at: '2026-07-26T01:00:00.000Z',
-  user: { login: 'alice' }, assignees: [{ login: 'bob' }], labels: [{ name: 'bug' }],
+  user: { login: 'alice' }, author_association: 'MEMBER', assignees: [{ login: 'bob' }], labels: [{ name: 'bug' }],
   repository_url: 'https://api.github.com/repos/acme/demo',
 };
 
@@ -449,5 +449,32 @@ describe('GithubPoller', () => {
     expect(matchesFilters(candidate, { ...definition, filters: { ...definition.filters, reviewers: ['carol'] } })).toBe(true);
     expect(matchesFilters(candidate, { ...definition, filters: { ...definition.filters, reviewers: ['dave'] } })).toBe(false);
     expect(matchesFilters(candidate, { ...definition, filters: { ...definition.filters, reviewers: ['CAROL'] } })).toBe(true);
+  });
+});
+
+describe('opened events from untrusted authors (security hardening)', () => {
+  const definition = { filters: { lookbackDays: 7, maxRecords: 25 } } as unknown as Parameters<typeof matchesFilters>[1];
+  const candidate = (event: 'issue.opened' | 'pull_request.opened' | 'issue.labeled', authorAssociation?: string) => ({
+    eventId: 'e', event, timestamp: '2026-07-26T00:00:00.000Z', tieBreaker: 'I', repo: 'acme/demo', nodeId: 'I', number: 7,
+    title: 'x', url: 'https://github.com/acme/demo/issues/7', author: 'stranger', assignees: [], labels: [],
+    ...(authorAssociation ? { authorAssociation } : {}),
+  });
+
+  it('fires only for owners, members and collaborators by default', () => {
+    for (const trusted of ['OWNER', 'MEMBER', 'COLLABORATOR', 'member']) {
+      expect(matchesFilters(candidate('issue.opened', trusted), definition)).toBe(true);
+    }
+    for (const untrusted of ['NONE', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', undefined]) {
+      expect(matchesFilters(candidate('issue.opened', untrusted), definition)).toBe(false);
+      expect(matchesFilters(candidate('pull_request.opened', untrusted), definition)).toBe(false);
+    }
+  });
+
+  it('an explicit authors filter or allowAnyAuthor admits them; maintainer-driven events are not gated', () => {
+    const withAuthors = { ...definition, filters: { ...definition.filters, authors: ['stranger'] } } as typeof definition;
+    expect(matchesFilters(candidate('issue.opened', 'NONE'), withAuthors)).toBe(true);
+    const anyAuthor = { ...definition, filters: { ...definition.filters, allowAnyAuthor: true } } as typeof definition;
+    expect(matchesFilters(candidate('pull_request.opened', 'NONE'), anyAuthor)).toBe(true);
+    expect(matchesFilters(candidate('issue.labeled', 'NONE'), definition)).toBe(true);
   });
 });

@@ -25,6 +25,7 @@ const githubItemSchema = z.object({
   updated_at: z.string().datetime().optional(),
   closed_at: z.string().datetime().nullable().optional(),
   user: z.object({ login: z.string() }),
+  author_association: z.string().optional(),
   assignees: z.array(z.object({ login: z.string() })).default([]),
   labels: z.array(z.object({ name: z.string() })).default([]),
   repository_url: z.string().url(),
@@ -74,6 +75,8 @@ export interface GithubCandidate {
   title: string;
   url: string;
   author: string;
+  /** GitHub's `author_association` of the item's author (`OWNER`, `MEMBER`, `NONE`, …). */
+  authorAssociation?: string;
   assignees: string[];
   labels: string[];
   changedLabel?: string;
@@ -480,6 +483,7 @@ function normalizeOpened(owner: string, repo: string, item: z.infer<typeof githu
     title: sanitize(item.title, 500),
     url: item.html_url,
     author: item.user.login,
+    ...(item.author_association ? { authorAssociation: item.author_association } : {}),
     assignees: item.assignees.map((assignee) => assignee.login),
     labels: item.labels.map((label) => label.name),
   };
@@ -601,10 +605,26 @@ export function reconstructReviewEvents(
   return rows.sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.tieBreaker.localeCompare(b.tieBreaker));
 }
 
+/** Authors with write access to the repo; anyone else may be a stranger on a public repo. */
+const TRUSTED_AUTHOR_ASSOCIATIONS: ReadonlySet<string> = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+
+/**
+ * An `*.opened` event fires on an item anyone can create on a public repo, and its title and body
+ * become the agent's prompt. Without an `authors` filter, only trusted authors fire it unless the
+ * automation opts in with `filters.allowAnyAuthor`. Labels, reviews and merges are themselves
+ * maintainer actions, so they are not gated.
+ */
+export function isTrustedOpenedEvent(candidate: GithubCandidate, filters: GithubAutomationDefinition['filters']): boolean {
+  if (candidate.event !== 'issue.opened' && candidate.event !== 'pull_request.opened') return true;
+  if (filters.authors?.length || filters.allowAnyAuthor === true) return true;
+  return TRUSTED_AUTHOR_ASSOCIATIONS.has((candidate.authorAssociation ?? '').toUpperCase());
+}
+
 export function matchesFilters(candidate: GithubCandidate, definition: GithubAutomationDefinition): boolean {
   const lower = (values: readonly string[]) => new Set(values.map((value) => value.toLowerCase()));
   const labels = lower(candidate.labels);
   const filters = definition.filters;
+  if (!isTrustedOpenedEvent(candidate, filters)) return false;
   if (filters.authors?.length && !lower(filters.authors).has(candidate.author.toLowerCase())) return false;
   if (filters.assignees?.length && !candidate.assignees.some((value) => lower(filters.assignees!).has(value.toLowerCase()))) return false;
   if (filters.allLabels?.some((value) => !labels.has(value.toLowerCase()))) return false;
