@@ -61,7 +61,7 @@ export interface ClaudeSandboxSettings {
     enabled: true;
     failIfUnavailable: true;
     allowUnsandboxedCommands: false;
-    autoAllowBashIfSandboxed: true;
+    autoAllowBashIfSandboxed: false;
     filesystem: { denyRead: string[]; allowWrite: string[] };
     network: { allowedDomains: string[]; allowLocalBinding: true };
   };
@@ -104,7 +104,8 @@ export function claudeSandboxSettings(
       enabled: true,
       failIfUnavailable: true,
       allowUnsandboxedCommands: false,
-      autoAllowBashIfSandboxed: true,
+      // Never widen `--allowedTools`: a step's `bashAllowlist` must still decide which commands run.
+      autoAllowBashIfSandboxed: false,
       filesystem: { denyRead, allowWrite },
       network: { allowedDomains, allowLocalBinding: true },
     },
