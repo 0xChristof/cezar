@@ -9,6 +9,7 @@ import {
   owned,
   shared,
   shquote,
+  MIN_COCKPIT_PASSWORD,
   StepAborted,
   StepCancelled,
   StepSkipped,
@@ -348,13 +349,20 @@ export function nginxVhost(
       '    http2 on;\n'
     : '';
   return `# Managed by cezar server-install — do not edit by hand.
+# Basic auth has no lockout: cap requests per client IP so a password cannot be guessed at line
+# rate. The burst absorbs a cockpit page load (bundle chunks + API reads); SSE streams are long-lived.
+limit_req_zone $binary_remote_addr zone=cezar_${zoneSuffix(serverName)}:10m rate=20r/s;
+
 server {
     listen 80;
     listen [::]:80;
     server_name ${serverName};
+    server_tokens off;
 ${http2Block}
     auth_basic "cezar";
     auth_basic_user_file ${htpasswd};
+    limit_req zone=cezar_${zoneSuffix(serverName)} burst=200 nodelay;
+    limit_req_status 429;
 
     location / {
         proxy_pass http://127.0.0.1:${port};
@@ -373,6 +381,11 @@ ${http2Block}
     }
 }
 `;
+}
+
+/** A vhost-unique rate-limit zone name: two cockpits on one nginx must not share (or redefine) a zone. */
+function zoneSuffix(serverName: string): string {
+  return serverName.replace(/[^A-Za-z0-9]/g, '_').slice(0, 64) || 'default';
 }
 
 /** Build a privileged command that writes file content atomically (base64 → no quoting hell). */
@@ -455,7 +468,7 @@ const nginxProxyStep: InstallStep = {
     if (ctx.assumeYes) {
       const typed = await ctx.ui.password({
         message: `Set the HTTPS cockpit password for "${user}"`,
-        validate: (v) => (v.length >= 6 ? undefined : 'use at least 6 characters'),
+        validate: (v) => (v.length >= MIN_COCKPIT_PASSWORD ? undefined : `use at least ${MIN_COCKPIT_PASSWORD} characters`),
       });
       if (typed === CANCEL) throw new StepCancelled();
       password = String(typed);
@@ -478,7 +491,7 @@ const nginxProxyStep: InstallStep = {
       } else {
         const typed = await ctx.ui.password({
           message: `Set the HTTPS cockpit password for "${user}"`,
-          validate: (v) => (v.length >= 6 ? undefined : 'use at least 6 characters'),
+          validate: (v) => (v.length >= MIN_COCKPIT_PASSWORD ? undefined : `use at least ${MIN_COCKPIT_PASSWORD} characters`),
         });
         if (typed === CANCEL) throw new StepCancelled();
         password = String(typed);
@@ -487,8 +500,8 @@ const nginxProxyStep: InstallStep = {
     // The non-interactive UI (`--yes`) cannot invent a password and does not run
     // validators — refuse rather than write an empty-password htpasswd (a public
     // cockpit anyone can open). A real install must set a password interactively.
-    if (!ctx.dryRun && String(password).length < 6) {
-      throw new StepAborted('a cockpit password (≥6 chars) is required — run server-install without --yes to set one');
+    if (!ctx.dryRun && String(password).length < MIN_COCKPIT_PASSWORD) {
+      throw new StepAborted(`a cockpit password (≥${MIN_COCKPIT_PASSWORD} chars) is required — run server-install without --yes to set one`);
     }
     // Keep the credentials in memory (never persisted) so the final verify step
     // can prove an authenticated request actually reaches cezar over the proxy.
@@ -732,19 +745,30 @@ const sslStep: InstallStep = {
     // rate limit). Route it through sudoStep so it honors the sudo/delegate
     // choice (issue #7) and offers Skip on repeated failure (issue #8) — on
     // skip, nginx is already configured for a later manual certbot run.
-    await sudoStep(ctx, {
-      description: `Obtain and install a Let’s Encrypt certificate for ${String(domain).trim()} (adds HTTPS + redirect).`,
-      command: `certbot --nginx -d ${shquote(String(domain).trim())} --non-interactive --agree-tos -m ${shquote(String(email).trim())} --redirect`,
-      skippable: true,
-      skipHint: `run later: sudo certbot --nginx -d ${String(domain).trim()}`,
-      // Verify via the nginx vhost, NOT /etc/letsencrypt/live — that dir is 0700
-      // root, so a non-root `test -d` (the operator ran certbot themselves) fails
-      // with permission-denied and reports a false failure even when the cert was
-      // issued. certbot --nginx writes `ssl_certificate …` into the vhost, which
-      // is world-readable, so grepping it works without root.
-      verify: (c) => verifyCommand(c, 'sh', ['-c', `grep -qs ssl_certificate ${vhostAvail} ${vhostEnbl}`]),
-      verifyFailure: async (c) => nginxConfigTestFailure(c),
-    });
+    try {
+      await sudoStep(ctx, {
+        description: `Obtain and install a Let’s Encrypt certificate for ${String(domain).trim()} (adds HTTPS + redirect).`,
+        command: `certbot --nginx -d ${shquote(String(domain).trim())} --non-interactive --agree-tos -m ${shquote(String(email).trim())} --redirect`,
+        skippable: true,
+        skipHint: `run later: sudo certbot --nginx -d ${String(domain).trim()}`,
+        // Verify via the nginx vhost, NOT /etc/letsencrypt/live — that dir is 0700
+        // root, so a non-root `test -d` (the operator ran certbot themselves) fails
+        // with permission-denied and reports a false failure even when the cert was
+        // issued. certbot --nginx writes `ssl_certificate …` into the vhost, which
+        // is world-readable, so grepping it works without root.
+        verify: (c) => verifyCommand(c, 'sh', ['-c', `grep -qs ssl_certificate ${vhostAvail} ${vhostEnbl}`]),
+        verifyFailure: async (c) => nginxConfigTestFailure(c),
+      });
+    } catch (err) {
+      // Without TLS the basic-auth password crosses the network in cleartext on every request.
+      if (err instanceof StepSkipped) {
+        ctx.ui.warn(
+          `HTTPS was NOT set up: the cockpit is served over plain HTTP and its password is sent in cleartext. ` +
+            `Do not log in from an untrusted network until you run: sudo certbot --nginx -d ${String(domain).trim()}`,
+        );
+      }
+      throw err;
+    }
 
     // The certificate is in place, so a TLS listener now exists. On nginx
     // < 1.25.1 that listener's `http2` parameter is the ONLY way to enable

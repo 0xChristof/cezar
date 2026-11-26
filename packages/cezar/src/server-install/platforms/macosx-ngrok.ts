@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CANCEL, PreflightError, type InstallContext, type InstallStep, type PlatformStrategy, type StepArtifact } from '../types.ts';
-import { brewInstallTool, brewRemoveHint, depCheckStep, HOSTNAME_RE, owned, shared, StepAborted, StepCancelled, verifyCommand } from '../steps.ts';
+import { brewInstallTool, brewRemoveHint, depCheckStep, HOSTNAME_RE, MIN_COCKPIT_PASSWORD, owned, shared, StepAborted, StepCancelled, verifyCommand } from '../steps.ts';
 
 /**
  * The `macosx-ngrok` strategy: the app runs locally on a Mac and ngrok is the
@@ -15,6 +15,10 @@ import { brewInstallTool, brewRemoveHint, depCheckStep, HOSTNAME_RE, owned, shar
 
 const PLIST_LABEL = 'ai.cezar.ngrok';
 const plistPath = (): string => join(homedir(), 'Library', 'LaunchAgents', `${PLIST_LABEL}.plist`);
+/** The tunnel definition (basic-auth included), `0600`: credentials stay out of argv, which `ps` shows every local user. */
+const tunnelConfigPath = (): string => join(homedir(), 'Library', 'Application Support', 'cezar', 'ngrok-tunnel.yml');
+const NGROK_DEFAULT_CONFIG = (): string => join(homedir(), 'Library', 'Application Support', 'ngrok', 'ngrok.yml');
+const TUNNEL_NAME = 'cezar';
 
 /**
  * `launchctl bootstrap` + proof the agent actually loaded. A discarded
@@ -36,10 +40,30 @@ function escapeXml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-/** launchd agent that keeps an authenticated ngrok tunnel to the local cockpit up. */
-export function launchdPlist(port: number, basicAuth: string, domain?: string, ngrokBin = '/opt/homebrew/bin/ngrok'): string {
-  const args = ['http', String(port), '--basic-auth', basicAuth];
-  if (domain) args.push('--domain', domain);
+/** ngrok tunnel definition for `ngrok start`; JSON strings are valid YAML double-quoted scalars. */
+export function ngrokTunnelConfig(port: number, basicAuth: string, domain?: string): string {
+  return [
+    '# Managed by cezar server-install — do not edit by hand.',
+    'version: "3"',
+    'tunnels:',
+    `  ${TUNNEL_NAME}:`,
+    '    proto: http',
+    `    addr: ${port}`,
+    ...(domain ? [`    domain: ${JSON.stringify(domain)}`] : []),
+    '    basic_auth:',
+    `      - ${JSON.stringify(basicAuth)}`,
+    '',
+  ].join('\n');
+}
+
+/** launchd agent that keeps an authenticated ngrok tunnel to the local cockpit up. Its argv
+ *  names only config files: the basic-auth credentials live in the `0600` tunnel config. */
+export function launchdPlist(
+  tunnelConfig: string,
+  ngrokConfig = NGROK_DEFAULT_CONFIG(),
+  ngrokBin = '/opt/homebrew/bin/ngrok',
+): string {
+  const args = ['start', TUNNEL_NAME, '--config', ngrokConfig, '--config', tunnelConfig];
   // Escape every arg — a password/domain with `&`, `<`, `>` would otherwise
   // produce invalid plist XML and launchctl would silently fail to load it.
   const argXml = [ngrokBin, ...args]
@@ -119,11 +143,11 @@ const ngrokStep: InstallStep = {
     if (user === CANCEL) throw new StepCancelled();
     const password = await ctx.ui.password({
       message: `Basic-auth password for "${user}"`,
-      validate: (v) => (v.length >= 6 ? undefined : 'use at least 6 characters'),
+      validate: (v) => (v.length >= MIN_COCKPIT_PASSWORD ? undefined : `use at least ${MIN_COCKPIT_PASSWORD} characters`),
     });
     if (password === CANCEL) throw new StepCancelled();
-    if (!ctx.dryRun && String(password).length < 6) {
-      throw new StepAborted('a basic-auth password (≥6 chars) is required — run server-install without --yes to set one');
+    if (!ctx.dryRun && String(password).length < MIN_COCKPIT_PASSWORD) {
+      throw new StepAborted(`a basic-auth password (≥${MIN_COCKPIT_PASSWORD} chars) is required — run server-install without --yes to set one`);
     }
     const basicAuth = `${String(user)}:${String(password)}`;
 
@@ -136,11 +160,22 @@ const ngrokStep: InstallStep = {
       // Silicon (/opt/homebrew/bin) and Intel (/usr/local/bin) Macs.
       const ngrokBin = (await ctx.runner.capture('bash', ['-lc', 'command -v ngrok'])).stdout.trim() || '/opt/homebrew/bin/ngrok';
 
-      mkdirSync(join(homedir(), 'Library', 'LaunchAgents'), { recursive: true });
+      // ngrok's own config (the authtoken) is loaded explicitly: a `--config` flag replaces the default.
+      const checked = (await ctx.runner.capture('ngrok', ['config', 'check'])).stdout;
+      const ngrokConfig = /Valid configuration file at (.+)$/m.exec(checked)?.[1]?.trim() || NGROK_DEFAULT_CONFIG();
+
       // 0600: unlike the Linux htpasswd (a hash, 0640 root:www-data), this file
-      // embeds the PLAINTEXT basic-auth credentials. `mode` only applies on
-      // create, so chmod too for re-installs over an existing 0644 plist.
-      writeFileSync(path, launchdPlist(ctx.state.primaryPort, basicAuth, domain, ngrokBin), { encoding: 'utf8', mode: 0o600 });
+      // holds the PLAINTEXT basic-auth credentials. `mode` only applies on
+      // create, so chmod too for re-installs over an existing file.
+      const tunnelConfig = tunnelConfigPath();
+      mkdirSync(dirname(tunnelConfig), { recursive: true, mode: 0o700 });
+      writeFileSync(tunnelConfig, ngrokTunnelConfig(ctx.state.primaryPort, basicAuth, domain), { encoding: 'utf8', mode: 0o600 });
+      chmodSync(tunnelConfig, 0o600);
+      const valid = await ctx.runner.capture('ngrok', ['config', 'check', '--config', ngrokConfig, '--config', tunnelConfig]);
+      if (valid.code !== 0) throw new StepAborted(`ngrok rejected the tunnel config ${tunnelConfig}: ${valid.stderr.trim() || valid.stdout.trim()}`);
+
+      mkdirSync(join(homedir(), 'Library', 'LaunchAgents'), { recursive: true });
+      writeFileSync(path, launchdPlist(tunnelConfig, ngrokConfig, ngrokBin), { encoding: 'utf8', mode: 0o600 });
       chmodSync(path, 0o600);
 
       // Use the modern launchctl API — the legacy `launchctl load` returns
@@ -163,6 +198,7 @@ const ngrokStep: InstallStep = {
       artifacts: [
         shared('ngrok-config', { name: 'authtoken', removeHint: 'ngrok config add-authtoken "" (or edit ~/Library/Application Support/ngrok/ngrok.yml)' }),
         owned('launchd', { name: PLIST_LABEL, path }),
+        owned('file', { name: 'ngrok tunnel config', path: tunnelConfigPath() }),
       ],
     };
   },
@@ -177,6 +213,7 @@ const ngrokStep: InstallStep = {
       const uid = process.getuid ? process.getuid() : 0;
       await ctx.runner.capture('launchctl', ['bootout', `gui/${uid}/${PLIST_LABEL}`]);
       rmSync(path, { force: true });
+      rmSync(tunnelConfigPath(), { force: true });
     }
     const cfg = (created?.artifacts ?? []).find((a) => a.type === 'ngrok-config');
     if (cfg) {

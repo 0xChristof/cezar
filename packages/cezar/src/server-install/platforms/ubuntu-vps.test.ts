@@ -192,12 +192,12 @@ describe('ubuntu-vps nginx-proxy security', () => {
 
   it('feeds the password to openssl via stdin, never as an argv (H2)', async () => {
     const capture = vi.fn(async (_p: string, _a: string[], _o?: { input?: string }) => ({ code: 0, stdout: 'hash', stderr: '' }));
-    await stepById('nginx-proxy').run(secCtx('hunter2', capture));
+    await stepById('nginx-proxy').run(secCtx('hunter2-hunter2', capture));
     const openssl = capture.mock.calls.find((c) => c[0] === 'openssl');
     expect(openssl?.[1]).toEqual(['passwd', '-apr1', '-stdin']);
-    expect(openssl?.[2]).toEqual({ input: 'hunter2\n' });
+    expect(openssl?.[2]).toEqual({ input: 'hunter2-hunter2\n' });
     // the plaintext is never passed as a command argument
-    expect(capture.mock.calls.some((c) => c[1].includes('hunter2'))).toBe(false);
+    expect(capture.mock.calls.some((c) => c[1].includes('hunter2-hunter2'))).toBe(false);
   });
 
   it('refuses an empty/too-short password instead of creating an open cockpit (H1)', async () => {
@@ -281,7 +281,7 @@ describe('HTTP/2 syntax per nginx version (#910)', () => {
       ...createAutoUi(),
       text: async (o: { message: string }) =>
         o.message.includes('Domain') ? 'cezar.example.com' : o.message.includes('Email') ? 'ops@example.com' : 'ops',
-      password: async () => 'longenough',
+      password: async () => 'longenough-pass',
     } as Ui;
   }
 
@@ -416,7 +416,7 @@ describe('ubuntu-vps multi-instance artifact paths', () => {
   }
 
   it('the default instance records the legacy un-suffixed nginx/htpasswd paths', async () => {
-    const ui = { ...createAutoUi(), text: async () => 'ops', password: async () => 'longenough' } as Ui;
+    const ui = { ...createAutoUi(), text: async () => 'ops', password: async () => 'longenough-pass' } as Ui;
     const ctx = { ...ctxWith({ ui, dryRun: true }), assumeYes: true } as InstallContext;
     const created = await stepById('nginx-proxy').run(ctx);
     const paths = (created?.artifacts ?? []).map((a) => a.path).filter(Boolean);
@@ -428,7 +428,7 @@ describe('ubuntu-vps multi-instance artifact paths', () => {
   it('a named instance suffixes the nginx site + htpasswd with its slug', async () => {
     const ctx = namedCtx();
     (ctx as { assumeYes: boolean }).assumeYes = true;
-    ctx.ui = { ...createAutoUi(), text: async () => 'ops', password: async () => 'longenough' } as Ui;
+    ctx.ui = { ...createAutoUi(), text: async () => 'ops', password: async () => 'longenough-pass' } as Ui;
     const created = await stepById('nginx-proxy').run(ctx);
     const paths = (created?.artifacts ?? []).map((a) => a.path).filter(Boolean);
     expect(paths).toContain('/etc/nginx/sites-available/cezar-shop-example-com');
@@ -850,7 +850,7 @@ describe('ubuntu-vps review fixes (PR #423)', () => {
     const ui = {
       ...createAutoUi(),
       text: async () => 'ops',
-      password: async () => 'longenough',
+      password: async () => 'longenough-pass',
     } as Ui;
     const interactive = vi.fn(async () => 0);
     const captured: Array<{ args: string[]; input?: string }> = [];
@@ -874,7 +874,7 @@ describe('ubuntu-vps review fixes (PR #423)', () => {
   });
 
   it('htpasswd credential line goes to sudo stdin, not argv (hash never ps-visible)', async () => {
-    const ui = { ...createAutoUi(), text: async () => 'ops', password: async () => 'longenough' } as Ui;
+    const ui = { ...createAutoUi(), text: async () => 'ops', password: async () => 'longenough-pass' } as Ui;
     const interactiveCalls: Array<{ args: string[]; input?: string }> = [];
     const ctx = {
       ...ctxWith({ ui }),
@@ -904,7 +904,7 @@ describe('ubuntu-vps review fixes (PR #423)', () => {
         if (o.message.toLowerCase().includes('username')) captured = o.validate;
         return 'ops';
       },
-      password: async () => 'longenough',
+      password: async () => 'longenough-pass',
     } as Ui;
     const runner: Runner = {
       capture: async (p) => ({ code: 0, stdout: p === 'openssl' ? '$apr1$abc$hash' : '', stderr: '' }),
