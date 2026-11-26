@@ -71,31 +71,44 @@ const EXITED_STDOUT_GRACE_MS = 1_000;
  * `thread/resume` to reopen a stored thread for "Continue".
  *
  * Auth = the host's logged-in ChatGPT/Codex session (or CODEX_API_KEY). The
- * agent runs autonomously via `sandbox: danger-full-access` +
- * `approvalPolicy: never`, matching cezar's default auto permission mode
- * (spec 2026-07-17-permission-modes). Supported read grants use an isolated home,
- * no native execution environment, and cezar's read broker; unsupported grants refuse. `CEZ_CODEX_NETWORK=0` retains the previous
- * network-blocked `workspace-write` sandbox as an explicit restriction.
+ * agent runs autonomously (`approvalPolicy: never`) inside Codex's `workspace-write`
+ * sandbox by default (`codexSandboxMode`). Supported read grants use an isolated home,
+ * no native execution environment, and cezar's read broker; unsupported grants refuse.
  */
 /**
- * The `thread/start` / `thread/resume` overrides. Full access is the `auto` preset shared by all
- * backends; besides avoiding prompts, it keeps container installs working when bubblewrap cannot
- * create a UID map (#563). `CEZ_CODEX_NETWORK=0` remains the explicit sandbox opt-out, and under
- * it the run's artifacts directory is added as a writable root, or a sandboxed run could not
- * publish (spec 2026-10-22-html-artifacts-and-impact).
+ * Codex's own OS sandbox for unrestricted tasks. Default `workspace`: `workspace-write` with no
+ * network, so a prompt-injected shell can neither write outside the worktree nor send anything
+ * out. `CEZ_CODEX_SANDBOX=network` adds network access; `full` restores `danger-full-access`
+ * (needed in containers where bubblewrap cannot create a UID map, #563).
+ * `CEZ_CODEX_NETWORK=0` always means `workspace`.
+ */
+export type CodexSandboxMode = 'workspace' | 'network' | 'full';
+export function codexSandboxMode(env: NodeJS.ProcessEnv = process.env): CodexSandboxMode {
+  if (env.CEZ_CODEX_NETWORK === '0') return 'workspace';
+  const v = env.CEZ_CODEX_SANDBOX?.trim().toLowerCase();
+  return v === 'full' || v === 'network' ? v : 'workspace';
+}
+
+/**
+ * The `thread/start` / `thread/resume` overrides. Under the sandbox the run's artifacts directory
+ * is added as a writable root, or a sandboxed run could not publish
+ * (spec 2026-10-22-html-artifacts-and-impact).
  */
 export function codexThreadOverrides(
   spec: Pick<AgentRunSpec, 'model' | 'cwd' | 'env' | 'enforceReadOnly'>,
   mcpConfig: Record<string, unknown> | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): Record<string, unknown> {
-  const sandboxed = env.CEZ_CODEX_NETWORK === '0';
+  const mode = codexSandboxMode(env);
+  const sandboxed = mode !== 'full';
   const artifacts = sandboxed ? spec.env?.CEZ_ARTIFACTS_DIR : undefined;
   // Private MCP servers (spec 2026-10-07-private-project-mcp) ride in as per-server dotted
   // config overrides, so the user's own [mcp_servers] table is extended, never replaced.
-  const config = artifacts
-    ? { ...mcpConfig, 'sandbox_workspace_write.writable_roots': [artifacts] }
-    : mcpConfig;
+  const sandboxConfig: Record<string, unknown> = {
+    ...(artifacts ? { 'sandbox_workspace_write.writable_roots': [artifacts] } : {}),
+    ...(mode === 'network' && !spec.enforceReadOnly ? { 'sandbox_workspace_write.network_access': true } : {}),
+  };
+  const config = Object.keys(sandboxConfig).length > 0 ? { ...mcpConfig, ...sandboxConfig } : mcpConfig;
   return {
     model: spec.model,
     cwd: spec.cwd,

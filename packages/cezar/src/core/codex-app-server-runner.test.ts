@@ -862,14 +862,31 @@ describe('the artifacts directory under the Codex sandbox (spec 2026-10-22-html-
     });
   });
 
-  it('keeps the default full-access policy', () => {
+  it('defaults to the offline workspace-write sandbox, artifacts writable', () => {
     expect(codexThreadOverrides(spec, undefined, {})).toEqual({
+      model: 'gpt-5',
+      cwd: '/wt',
+      sandbox: 'workspace-write',
+      approvalPolicy: 'never',
+      config: { 'sandbox_workspace_write.writable_roots': ['/data/artifacts/r1'] },
+    });
+  });
+
+  it('CEZ_CODEX_SANDBOX=network adds network access; =full restores full access', () => {
+    expect(codexThreadOverrides(spec, undefined, { CEZ_CODEX_SANDBOX: 'network' })).toMatchObject({
+      sandbox: 'workspace-write',
+      config: { 'sandbox_workspace_write.network_access': true },
+    });
+    expect(codexThreadOverrides(spec, undefined, { CEZ_CODEX_SANDBOX: 'full' })).toEqual({
       model: 'gpt-5',
       cwd: '/wt',
       sandbox: 'danger-full-access',
       approvalPolicy: 'never',
       config: undefined,
     });
+    // The explicit offline switch outranks a wider sandbox setting.
+    expect(codexThreadOverrides(spec, undefined, { CEZ_CODEX_SANDBOX: 'full', CEZ_CODEX_NETWORK: '0' })).toMatchObject({ sandbox: 'workspace-write' });
+    expect(codexThreadOverrides({ ...spec, enforceReadOnly: true }, undefined, { CEZ_CODEX_SANDBOX: 'network' }).sandbox).toBe('read-only');
   });
 });
 
