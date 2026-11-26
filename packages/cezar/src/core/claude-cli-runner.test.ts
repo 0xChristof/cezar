@@ -764,9 +764,11 @@ describe('default OS sandbox for Claude Bash', () => {
   it('is on by default: fail-closed, no unsandboxed retry, credential stores unreadable', () => {
     const settings = claudeSandboxSettings(on, { home, platform: 'linux', exists: () => true })!;
     expect(settings.sandbox).toMatchObject({ enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: false });
-    expect(settings.sandbox.filesystem.denyRead).toEqual(expect.arrayContaining([`${home}/.ssh`, `${home}/.aws`, `${home}/.cezar`, `${home}/.config/gh`]));
+    expect(settings.sandbox.filesystem.denyRead).toEqual(expect.arrayContaining([`${home}/.ssh`, `${home}/.aws`, `${home}/.cezar/secrets`, `${home}/.cezar/runtime`, `${home}/.config/gh`]));
+    // The agent's TMPDIR and the `cez` binary live elsewhere under ~/.cezar.
+    expect(settings.sandbox.filesystem.denyRead).not.toContain(`${home}/.cezar`);
     expect(settings.permissions.deny).toEqual(expect.arrayContaining([`Read(/${home}/.ssh/**)`, `Read(/${home}/.netrc)`]));
-    expect(settings.sandbox.network.allowedDomains).toEqual(expect.arrayContaining(['registry.npmjs.org', '127.0.0.1']));
+    expect(settings.sandbox.network.allowedDomains).toEqual(expect.arrayContaining(['registry.npmjs.org', '127.0.0.1', 'api.github.com']));
     expect(settings.sandbox.network.allowedDomains).not.toContain('example.com');
   });
 
@@ -810,5 +812,30 @@ describe('default OS sandbox for Claude Bash', () => {
     expect(merged.permissions.deny.length).toBeGreaterThan(1);
     expect(merged.sandbox.enabled).toBe(true);
     expect(withClaudeSandbox({ a: 1 }, { CEZ_AGENT_SANDBOX: '0' })).toEqual({ a: 1 });
+  });
+});
+
+describe('the run\'s own files outside the worktree stay writable under the sandbox', () => {
+  const env: NodeJS.ProcessEnv = { HOME: '/home/dev' };
+  const runEnv = { CEZ_HANDOFF_FILE: '/repo/.ai/cezar/runs/r1.handoff.md', CEZ_TODOS_FILE: '/repo/.ai/cezar/todos.json', CEZ_TASK_ID: 'r1' };
+
+  it('grants the handoff and todos files, on macOS even before they exist', () => {
+    const settings = claudeSandboxSettings(env, { platform: 'darwin', exists: () => false, runFiles: [runEnv.CEZ_HANDOFF_FILE, runEnv.CEZ_TODOS_FILE] })!;
+    expect(settings.sandbox.filesystem.allowWrite).toEqual([runEnv.CEZ_HANDOFF_FILE, runEnv.CEZ_TODOS_FILE]);
+    const linux = claudeSandboxSettings(env, { platform: 'linux', exists: (p) => p === runEnv.CEZ_TODOS_FILE, runFiles: [runEnv.CEZ_HANDOFF_FILE, runEnv.CEZ_TODOS_FILE] })!;
+    expect(linux.sandbox.filesystem.allowWrite).toEqual([runEnv.CEZ_TODOS_FILE]);
+  });
+
+  it('grants existing temp dirs, the host one by default', () => {
+    const settings = claudeSandboxSettings(env, { home: '/home/dev', platform: 'darwin', exists: (p) => p !== '/gone', tempDirs: ['/var/folders/x/T', '/repo/tmp/r1', '/gone', '/repo/tmp/r1'] })!;
+    const temps = settings.sandbox.filesystem.allowWrite.filter((p) => !p.startsWith('/home/dev/'));
+    expect(temps).toEqual(['/var/folders/x/T', '/repo/tmp/r1']);
+  });
+
+  it('buildClaudeArgs passes them from the run env', () => {
+    const args = buildClaudeArgs({ userPrompt: 'go', cwd: '/repo/wt', allowedTools: ['Bash'], env: runEnv }, env);
+    const settings = JSON.parse(args[args.indexOf('--settings') + 1]!) as { sandbox: { filesystem: { allowWrite: string[] } } };
+    if (process.platform === 'darwin') expect(settings.sandbox.filesystem.allowWrite).toEqual(expect.arrayContaining([runEnv.CEZ_HANDOFF_FILE]));
+    expect(settings.sandbox.filesystem.allowWrite).not.toContain('/repo/.ai/cezar');
   });
 });

@@ -131,7 +131,7 @@ export class ClaudeCliRunner implements AgentRunner {
     const mcpConfig = writeClaudeMcpConfig(spec.mcpServers);
     const promptFile = writeClaudeSystemPromptFile(appendClaudeSystemPrompt(spec.systemPrompt));
     // One `--settings` flag only: the OS sandbox rides inside the fence file when there is one.
-    const settingsFile = writeClaudeSettingsFile(spec.claudeSettings && withClaudeSandbox(spec.claudeSettings, process.env));
+    const settingsFile = writeClaudeSettingsFile(spec.claudeSettings && withClaudeSandbox(spec.claudeSettings, process.env, sandboxRunFiles(spec), spec.env?.TMPDIR));
     // A fence that could not be written must not run unfenced.
     if (spec.claudeSettings && !settingsFile) {
       mcpConfig?.cleanup();
@@ -516,7 +516,7 @@ export function buildClaudeArgs(
     ? { sandbox: { excludedCommands: spec.sandboxExcludedCommands } }
     : {};
   const fenceFile = settingsPath && spec.claudeSettings;
-  const inline = fenceFile ? { ...hook, ...sandbox } : withClaudeSandbox({ ...hook, ...sandbox }, env);
+  const inline = fenceFile ? { ...hook, ...sandbox } : withClaudeSandbox({ ...hook, ...sandbox }, env, sandboxRunFiles(spec), spec.env?.TMPDIR);
   if (Object.keys(inline).length > 0) {
     args.push('--settings', JSON.stringify(inline));
   }
@@ -550,9 +550,19 @@ export function claudeMcpServers(msg: unknown): Extract<AgentEvent, { type: 'mcp
   return { type: 'mcp-servers', servers, tools };
 }
 
+/** The run's own files outside the worktree that its shell writes (#2115 hands claude the dirs). */
+function sandboxRunFiles(spec: Pick<AgentRunSpec, 'env'>): string[] {
+  return [spec.env?.CEZ_HANDOFF_FILE, spec.env?.CEZ_TODOS_FILE].filter((p): p is string => Boolean(p));
+}
+
 /** `settings` plus the default OS sandbox (`claude-sandbox.ts`); caller keys win, deny rules add up. */
-export function withClaudeSandbox(settings: Record<string, unknown>, env: NodeJS.ProcessEnv): Record<string, unknown> {
-  const os = claudeSandboxSettings(env);
+export function withClaudeSandbox(
+  settings: Record<string, unknown>,
+  env: NodeJS.ProcessEnv,
+  runFiles: readonly string[] = [],
+  runTmp?: string,
+): Record<string, unknown> {
+  const os = claudeSandboxSettings(env, { runFiles, tempDirs: [tmpdir(), ...(runTmp ? [runTmp] : [])] });
   if (!os) return settings;
   const own = (key: string): Record<string, unknown> => {
     const value = settings[key];

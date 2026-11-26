@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 /**
@@ -23,7 +23,16 @@ const DENY_READ_HOME = [
   '.npmrc',
   '.pypirc',
   '.git-credentials',
-  '.cezar',
+  // cezar's own secrets only: the rest of ~/.cezar holds the agent's TMPDIR and the `cez` binary.
+  '.cezar/secrets',
+  '.cezar/tracker-connections',
+  '.cezar/runtime',
+  '.cezar/instances',
+  '.cezar/server-instances',
+  '.cezar/server.json',
+  // Agent CLIs read their own logins outside the sandbox; a sandboxed shell never needs them.
+  '.claude/.credentials.json',
+  '.codex/auth.json',
   '.config/gcloud',
   '.config/op',
   'Library/Keychains',
@@ -52,6 +61,7 @@ export const DEFAULT_SANDBOX_DOMAINS = [
   'pypi.org',
   'files.pythonhosted.org',
   'github.com',
+  'api.github.com',
   'codeload.github.com',
   'objects.githubusercontent.com',
 ] as const;
@@ -85,18 +95,31 @@ function list(value: string | undefined): string[] {
 /** undefined = no sandbox (opted out, or native Windows, where Claude Code has none). */
 export function claudeSandboxSettings(
   env: NodeJS.ProcessEnv = process.env,
-  opts: { home?: string; platform?: NodeJS.Platform; exists?: (path: string) => boolean } = {},
+  opts: {
+    home?: string;
+    platform?: NodeJS.Platform;
+    exists?: (path: string) => boolean;
+    /** This run's own files outside the worktree (handoff, todos); `--add-dir` dirs are already writable. */
+    runFiles?: readonly string[];
+    /** Temp dirs the shell writes: the host's (macOS `mktemp` uses it whatever `$TMPDIR` says) and the run's own. */
+    tempDirs?: readonly string[];
+  } = {},
 ): ClaudeSandboxSettings | undefined {
   if (isOff(env.CEZ_AGENT_SANDBOX)) return undefined;
-  if ((opts.platform ?? process.platform) === 'win32') return undefined;
+  const platform = opts.platform ?? process.platform;
+  if (platform === 'win32') return undefined;
   const home = opts.home ?? homedir();
   const exists = opts.exists ?? existsSync;
 
   const denyHome = isOn(env.CEZ_AGENT_GH_TOKEN) ? [...DENY_READ_HOME] : [...DENY_READ_HOME, GH_CONFIG];
   const denyRead = [...denyHome.map((p) => join(home, p)), ...list(env.CEZ_AGENT_SANDBOX_DENY_READ)];
   // bubblewrap cannot bind a path that does not exist yet.
-  const allowWrite = [...ALLOW_WRITE_HOME.map((p) => join(home, p)), ...list(env.CEZ_AGENT_SANDBOX_ALLOW_WRITE)]
-    .filter((p) => exists(p));
+  const allowWrite = [
+    ...[...ALLOW_WRITE_HOME.map((p) => join(home, p)), ...list(env.CEZ_AGENT_SANDBOX_ALLOW_WRITE)].filter((p) => exists(p)),
+    // Seatbelt grants a file that does not exist yet; bubblewrap can only bind an existing one.
+    ...(opts.runFiles ?? []).filter((p) => p && (platform === 'darwin' || exists(p))),
+    ...[...new Set(opts.tempDirs ?? [tmpdir()])].filter((p) => p && exists(p)),
+  ];
   const allowedDomains = [...new Set([...DEFAULT_SANDBOX_DOMAINS, ...list(env.CEZ_AGENT_SANDBOX_DOMAINS)])];
 
   return {
