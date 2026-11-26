@@ -764,9 +764,9 @@ describe('default OS sandbox for Claude Bash', () => {
   it('is on by default: fail-closed, no unsandboxed retry, credential stores unreadable', () => {
     const settings = claudeSandboxSettings(on, { home, platform: 'linux', exists: () => true })!;
     expect(settings.sandbox).toMatchObject({ enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: false });
-    expect(settings.sandbox.filesystem.denyRead).toEqual(expect.arrayContaining([`${home}/.ssh`, `${home}/.aws`, `${home}/.cezar/secrets`, `${home}/.cezar/runtime`, `${home}/.config/gh`]));
-    // The agent's TMPDIR and the `cez` binary live elsewhere under ~/.cezar.
-    expect(settings.sandbox.filesystem.denyRead).not.toContain(`${home}/.cezar`);
+    expect(settings.sandbox.filesystem.denyRead).toEqual(expect.arrayContaining([`${home}/.ssh`, `${home}/.aws`, `${home}/.cezar`, `${home}/.config/gh`]));
+    // Only the agent's TMPDIR and the `cez` binary are carved back out of cezar's home.
+    expect(settings.sandbox.filesystem.allowRead).toEqual([`${home}/.cezar/tmp`, `${home}/.cezar/bin`, `${home}/.cezar/versions`]);
     expect(settings.permissions.deny).toEqual(expect.arrayContaining([`Read(/${home}/.ssh/**)`, `Read(/${home}/.netrc)`]));
     expect(settings.sandbox.network.allowedDomains).toEqual(expect.arrayContaining(['registry.npmjs.org', '127.0.0.1', 'api.github.com']));
     expect(settings.sandbox.network.allowedDomains).not.toContain('example.com');
@@ -826,10 +826,25 @@ describe('the run\'s own files outside the worktree stay writable under the sand
     expect(linux.sandbox.filesystem.allowWrite).toEqual([runEnv.CEZ_TODOS_FILE]);
   });
 
-  it('grants existing temp dirs, the host one by default', () => {
-    const settings = claudeSandboxSettings(env, { home: '/home/dev', platform: 'darwin', exists: (p) => p !== '/gone', tempDirs: ['/var/folders/x/T', '/repo/tmp/r1', '/gone', '/repo/tmp/r1'] })!;
+  it('grants only the run\'s own temp dir, never the host one', () => {
+    const settings = claudeSandboxSettings(env, { home: '/home/dev', platform: 'darwin', exists: (p) => p !== '/gone', tempDirs: ['/repo/tmp/r1', '/gone', '/repo/tmp/r1'] })!;
     const temps = settings.sandbox.filesystem.allowWrite.filter((p) => !p.startsWith('/home/dev/'));
-    expect(temps).toEqual(['/var/folders/x/T', '/repo/tmp/r1']);
+    expect(temps).toEqual(['/repo/tmp/r1']);
+    const byDefault = claudeSandboxSettings(env, { home: '/home/dev', platform: 'darwin', exists: () => true })!;
+    expect(byDefault.sandbox.filesystem.allowWrite.every((p) => p.startsWith('/home/dev/'))).toBe(true);
+  });
+
+  it('denies the Read tool every cezar-home entry but tmp, bin and versions; CEZ_HOME is honored', () => {
+    const settings = claudeSandboxSettings({ CEZ_HOME: '/srv/cez' }, {
+      home: '/home/dev', platform: 'linux', exists: () => true,
+      listDir: (p) => (p === '/srv/cez' ? ['tmp', 'bin', 'versions', 'uploads', 'managers'] : []),
+    })!;
+    expect(settings.sandbox.filesystem.denyRead).toContain('/srv/cez');
+    const deny = settings.permissions.deny;
+    for (const entry of ['uploads', 'managers', 'secrets', 'relay', 'agent-homes', 'agent-accounts.json']) {
+      expect(deny).toContain(`Read(//srv/cez/${entry}/**)`);
+    }
+    for (const entry of ['tmp', 'bin', 'versions']) expect(deny).not.toContain(`Read(//srv/cez/${entry}/**)`);
   });
 
   it('buildClaudeArgs passes them from the run env', () => {

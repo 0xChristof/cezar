@@ -562,7 +562,7 @@ export function withClaudeSandbox(
   runFiles: readonly string[] = [],
   runTmp?: string,
 ): Record<string, unknown> {
-  const os = claudeSandboxSettings(env, { runFiles, tempDirs: [tmpdir(), ...(runTmp ? [runTmp] : [])] });
+  const os = claudeSandboxSettings(env, { runFiles, tempDirs: runTmp ? [runTmp] : [] });
   if (!os) return settings;
   const own = (key: string): Record<string, unknown> => {
     const value = settings[key];
