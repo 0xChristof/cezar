@@ -41,7 +41,7 @@ A GitHub poll:
     "excludeLabels": ["wontfix"],                    //   must carry none of these
     "changedLabels": ["needs-agent"],                //   REQUIRED for issue.labeled / issue.unlabeled: the label whose change fires it
     "reviewers": ["octocat"],                        //   GitHub logins a review event must name — the reviewer for pull_request.reviewed, the requested one for the two review_requested events
-    "allowAnyAuthor": false,                         //   default false: without "authors", issue.opened / pull_request.opened fire only for authors with write access; true admits strangers on a public repo — set it only when the user asks
+    "allowAnyAuthor": false,                         //   default false: opened / closed events fire only for authors with write access (unless "authors" is set), pull_request.reviewed only for reviewers with write access (unless "reviewers" is set); true admits strangers on a public repo — set it only when the user asks
     "lookbackDays": 7,                               //   1-90 (default 7): how far back one poll looks
     "maxRecords": 25                                 //   1-100 (default 25): the most candidates one poll considers
   },

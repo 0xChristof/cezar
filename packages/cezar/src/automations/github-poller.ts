@@ -49,6 +49,7 @@ const reviewedTimelineEventSchema = z.object({
   event: z.literal('reviewed'),
   submitted_at: z.string().datetime(),
   user: z.object({ login: z.string() }),
+  author_association: z.string().optional(),
 });
 const reviewRequestedTimelineEventSchema = z.object({
   id: z.number().int().positive().optional(),
@@ -81,6 +82,8 @@ export interface GithubCandidate {
   labels: string[];
   changedLabel?: string;
   reviewer?: string;
+  /** `author_association` of the reviewer on a `pull_request.reviewed` row. */
+  reviewerAssociation?: string;
 }
 
 export interface GithubPollResult {
@@ -577,6 +580,7 @@ export function reconstructReviewEvents(
         timestamp: entry.submitted_at,
         tieBreaker: stable,
         reviewer: entry.user.login,
+        ...(entry.author_association ? { reviewerAssociation: entry.author_association } : {}),
       });
       hasReviewed.add(entry.user.login.toLowerCase());
       continue;
@@ -608,23 +612,38 @@ export function reconstructReviewEvents(
 /** Authors with write access to the repo; anyone else may be a stranger on a public repo. */
 const TRUSTED_AUTHOR_ASSOCIATIONS: ReadonlySet<string> = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
+/** Events only someone with write access can cause: labelling, merging, requesting a review. */
+const WRITE_ACCESS_EVENTS: ReadonlySet<AutomationEvent> = new Set([
+  'issue.labeled',
+  'issue.unlabeled',
+  'pull_request.merged',
+  'pull_request.review_requested',
+  'pull_request.rereview_requested',
+]);
+
+const trusted = (association: string | undefined): boolean =>
+  TRUSTED_AUTHOR_ASSOCIATIONS.has((association ?? '').toUpperCase());
+
 /**
- * An `*.opened` event fires on an item anyone can create on a public repo, and its title and body
- * become the agent's prompt. Without an `authors` filter, only trusted authors fire it unless the
- * automation opts in with `filters.allowAnyAuthor`. Labels, reviews and merges are themselves
- * maintainer actions, so they are not gated.
+ * On a public repo anyone can open an issue or PR, close their own PR or submit a review, and the
+ * item's text becomes the agent's prompt. Deny by default: such events fire only for a trusted
+ * actor (author, or reviewer for `pull_request.reviewed`) unless the automation names who may
+ * fire it (`authors` / `reviewers`) or opts in with `filters.allowAnyAuthor`. A missing
+ * association fails closed.
  */
-export function isTrustedOpenedEvent(candidate: GithubCandidate, filters: GithubAutomationDefinition['filters']): boolean {
-  if (candidate.event !== 'issue.opened' && candidate.event !== 'pull_request.opened') return true;
-  if (filters.authors?.length || filters.allowAnyAuthor === true) return true;
-  return TRUSTED_AUTHOR_ASSOCIATIONS.has((candidate.authorAssociation ?? '').toUpperCase());
+export function isTrustedEvent(candidate: GithubCandidate, filters: GithubAutomationDefinition['filters']): boolean {
+  if (WRITE_ACCESS_EVENTS.has(candidate.event) || filters.allowAnyAuthor === true) return true;
+  if (candidate.event === 'pull_request.reviewed') {
+    return Boolean(filters.reviewers?.length) || trusted(candidate.reviewerAssociation);
+  }
+  return Boolean(filters.authors?.length) || trusted(candidate.authorAssociation);
 }
 
 export function matchesFilters(candidate: GithubCandidate, definition: GithubAutomationDefinition): boolean {
   const lower = (values: readonly string[]) => new Set(values.map((value) => value.toLowerCase()));
   const labels = lower(candidate.labels);
   const filters = definition.filters;
-  if (!isTrustedOpenedEvent(candidate, filters)) return false;
+  if (!isTrustedEvent(candidate, filters)) return false;
   if (filters.authors?.length && !lower(filters.authors).has(candidate.author.toLowerCase())) return false;
   if (filters.assignees?.length && !candidate.assignees.some((value) => lower(filters.assignees!).has(value.toLowerCase()))) return false;
   if (filters.allLabels?.some((value) => !labels.has(value.toLowerCase()))) return false;

@@ -428,7 +428,7 @@ you exported alone, so a check step can still reach the cockpit you named.
 
 A GitHub automation whose events are all `pull_request.*` can set `"checkout": "pr-head"` in its `task`: each launched run forks its worktree from the matched PR's head (fetched into `refs/cezar/pr/<n>`) instead of the base branch, so its check steps verify the PR itself. A closed PR or a fork head launches nothing (`skipped` in the execution log) unless `"allowForkHeads": true` admits forks — whose checks then run without secrets. Such a run cannot open a draft PR (`409`). See [Verify a pull request](e2e-verification.md#verify-a-pull-request).
 
-On `issue.opened` and `pull_request.opened`, a GitHub automation with no `authors` filter fires only for authors with write access to the repository (`author_association` `OWNER`, `MEMBER` or `COLLABORATOR`): on a public repository anyone can open an issue, and its text becomes the agent's prompt. Set `"filters": { "allowAnyAuthor": true }` to admit every author. Label, review, close and merge events are maintainer actions and are not gated.
+Events a stranger can cause on a public repository are gated to people with write access (`author_association` `OWNER`, `MEMBER` or `COLLABORATOR`; a missing association fails closed): `issue.opened`, `pull_request.opened` and `pull_request.closed` by the item's author unless an `authors` filter names who may fire them, `pull_request.reviewed` by the reviewer unless a `reviewers` filter is set. Set `"filters": { "allowAnyAuthor": true }` to admit everyone. Label, merge and review-request events already need write access and are not gated.
 
 `onFail.retryOn` narrows the loop to the exit codes that mean *the work is
 wrong*. Omitted, any non-zero code loops back — right for `npm test`, which

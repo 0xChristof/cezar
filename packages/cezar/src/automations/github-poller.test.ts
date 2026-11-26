@@ -301,7 +301,7 @@ describe('GithubPoller', () => {
 
   it('reconstructs a submitted review as pull_request.reviewed, carrying the reviewer', () => {
     const rows = reconstructReviewEvents('acme', 'demo', item, [
-      { id: 1, event: 'reviewed', submitted_at: '2026-07-26T02:00:00.000Z', user: { login: 'carol' } },
+      { id: 1, event: 'reviewed', submitted_at: '2026-07-26T02:00:00.000Z', user: { login: 'carol' }, author_association: 'MEMBER' },
     ]);
     expect(rows).toEqual([expect.objectContaining({ event: 'pull_request.reviewed', reviewer: 'carol' })]);
   });
@@ -315,7 +315,7 @@ describe('GithubPoller', () => {
 
   it('also emits rereview_requested when the requested reviewer already reviewed the PR', () => {
     const rows = reconstructReviewEvents('acme', 'demo', item, [
-      { id: 1, event: 'reviewed', submitted_at: '2026-07-26T01:00:00.000Z', user: { login: 'carol' } },
+      { id: 1, event: 'reviewed', submitted_at: '2026-07-26T01:00:00.000Z', user: { login: 'carol' }, author_association: 'MEMBER' },
       { id: 2, event: 'review_requested', created_at: '2026-07-26T02:00:00.000Z', requested_reviewer: { login: 'carol' } },
     ]);
     expect(rows.map((row) => row.event)).toEqual([
@@ -333,7 +333,7 @@ describe('GithubPoller', () => {
       if (args.some((arg) => arg.includes('/timeline'))) {
         return JSON.stringify([
           { id: 1, event: 'review_requested', created_at: '2026-07-26T01:00:00.000Z', requested_reviewer: { login: 'carol' } },
-          { id: 2, event: 'reviewed', submitted_at: '2026-07-26T02:00:00.000Z', user: { login: 'carol' } },
+          { id: 2, event: 'reviewed', submitted_at: '2026-07-26T02:00:00.000Z', user: { login: 'carol' }, author_association: 'MEMBER' },
           { id: 3, event: 'review_requested', created_at: '2026-07-26T03:00:00.000Z', requested_reviewer: { login: 'carol' } },
           { id: 4, event: 'commented', created_at: '2026-07-26T03:30:00.000Z' },
         ]);
@@ -385,7 +385,7 @@ describe('GithubPoller', () => {
     const pages: Record<string, unknown[]> = {
       '1': Array.from({ length: 100 }, (_, index) => filler(index + 1)),
       '6': Array.from({ length: 100 }, (_, index) => filler(index + 500)),
-      '7': [{ id: 900, event: 'reviewed', submitted_at: '2026-07-26T02:00:00.000Z', user: { login: 'carol' } }],
+      '7': [{ id: 900, event: 'reviewed', submitted_at: '2026-07-26T02:00:00.000Z', user: { login: 'carol' }, author_association: 'MEMBER' }],
     };
     const run = vi.fn(async (_executable: string, args: readonly string[]) => {
       if (!args.some((arg) => arg.includes('/timeline'))) return JSON.stringify({ items: [pullRequest] });
@@ -416,7 +416,7 @@ describe('GithubPoller', () => {
     // and the scheduler reads a throw as a failure and backs the automation off for hours.
     const rows = reconstructReviewEvents('acme', 'demo', item, [
       { id: 1, event: 'reviewed', submitted_at: '2026-07-26T02:00:00.000Z', user: null },
-      { id: 2, event: 'reviewed', submitted_at: '2026-07-26T03:00:00.000Z', user: { login: 'carol' } },
+      { id: 2, event: 'reviewed', submitted_at: '2026-07-26T03:00:00.000Z', user: { login: 'carol' }, author_association: 'MEMBER' },
     ] as never);
     expect(rows.map((row) => row.reviewer)).toEqual(['carol']);
   });
@@ -452,29 +452,41 @@ describe('GithubPoller', () => {
   });
 });
 
-describe('opened events from untrusted authors (security hardening)', () => {
+describe('events an untrusted user can cause (security hardening)', () => {
   const definition = { filters: { lookbackDays: 7, maxRecords: 25 } } as unknown as Parameters<typeof matchesFilters>[1];
-  const candidate = (event: 'issue.opened' | 'pull_request.opened' | 'issue.labeled', authorAssociation?: string) => ({
+  type Event = Parameters<typeof matchesFilters>[0]['event'];
+  const candidate = (event: Event, authorAssociation?: string, extra: Record<string, string> = {}) => ({
     eventId: 'e', event, timestamp: '2026-07-26T00:00:00.000Z', tieBreaker: 'I', repo: 'acme/demo', nodeId: 'I', number: 7,
     title: 'x', url: 'https://github.com/acme/demo/issues/7', author: 'stranger', assignees: [], labels: [],
     ...(authorAssociation ? { authorAssociation } : {}),
+    ...extra,
+  });
+  const withFilters = (filters: Record<string, unknown>) => ({ ...definition, filters: { ...definition.filters, ...filters } }) as typeof definition;
+
+  it('opened and closed events fire only for owners, members and collaborators by default', () => {
+    for (const event of ['issue.opened', 'pull_request.opened', 'pull_request.closed'] as const) {
+      for (const trustedAssociation of ['OWNER', 'MEMBER', 'COLLABORATOR', 'member']) {
+        expect(matchesFilters(candidate(event, trustedAssociation), definition)).toBe(true);
+      }
+      for (const untrusted of ['NONE', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', undefined]) {
+        expect(matchesFilters(candidate(event, untrusted), definition)).toBe(false);
+      }
+    }
   });
 
-  it('fires only for owners, members and collaborators by default', () => {
-    for (const trusted of ['OWNER', 'MEMBER', 'COLLABORATOR', 'member']) {
-      expect(matchesFilters(candidate('issue.opened', trusted), definition)).toBe(true);
-    }
-    for (const untrusted of ['NONE', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', undefined]) {
-      expect(matchesFilters(candidate('issue.opened', untrusted), definition)).toBe(false);
-      expect(matchesFilters(candidate('pull_request.opened', untrusted), definition)).toBe(false);
-    }
+  it('a review fires only for a trusted reviewer, whoever wrote the PR', () => {
+    expect(matchesFilters(candidate('pull_request.reviewed', 'NONE', { reviewer: 'm', reviewerAssociation: 'MEMBER' }), definition)).toBe(true);
+    expect(matchesFilters(candidate('pull_request.reviewed', 'OWNER', { reviewer: 's', reviewerAssociation: 'NONE' }), definition)).toBe(false);
+    expect(matchesFilters(candidate('pull_request.reviewed', 'OWNER', { reviewer: 's' }), definition)).toBe(false);
+    expect(matchesFilters(candidate('pull_request.reviewed', 'OWNER', { reviewer: 's', reviewerAssociation: 'NONE' }), withFilters({ reviewers: ['s'] }))).toBe(true);
   });
 
-  it('an explicit authors filter or allowAnyAuthor admits them; maintainer-driven events are not gated', () => {
-    const withAuthors = { ...definition, filters: { ...definition.filters, authors: ['stranger'] } } as typeof definition;
-    expect(matchesFilters(candidate('issue.opened', 'NONE'), withAuthors)).toBe(true);
-    const anyAuthor = { ...definition, filters: { ...definition.filters, allowAnyAuthor: true } } as typeof definition;
-    expect(matchesFilters(candidate('pull_request.opened', 'NONE'), anyAuthor)).toBe(true);
-    expect(matchesFilters(candidate('issue.labeled', 'NONE'), definition)).toBe(true);
+  it('an explicit authors filter or allowAnyAuthor admits strangers; write-access events are not gated', () => {
+    expect(matchesFilters(candidate('issue.opened', 'NONE'), withFilters({ authors: ['stranger'] }))).toBe(true);
+    expect(matchesFilters(candidate('pull_request.opened', 'NONE'), withFilters({ allowAnyAuthor: true }))).toBe(true);
+    expect(matchesFilters(candidate('pull_request.reviewed', 'NONE', { reviewer: 's', reviewerAssociation: 'NONE' }), withFilters({ allowAnyAuthor: true }))).toBe(true);
+    for (const event of ['issue.labeled', 'issue.unlabeled', 'pull_request.merged', 'pull_request.review_requested', 'pull_request.rereview_requested'] as const) {
+      expect(matchesFilters(candidate(event, 'NONE'), definition)).toBe(true);
+    }
   });
 });
