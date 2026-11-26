@@ -612,13 +612,14 @@ export function reconstructReviewEvents(
 /** Authors with write access to the repo; anyone else may be a stranger on a public repo. */
 const TRUSTED_AUTHOR_ASSOCIATIONS: ReadonlySet<string> = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
-/** Events only someone with write access can cause: labelling, merging, requesting a review. */
+/**
+ * Events only a deliberate act of someone with write access causes: labelling, merging. Review
+ * requests are NOT here: CODEOWNERS requests reviews automatically when a stranger opens a PR.
+ */
 const WRITE_ACCESS_EVENTS: ReadonlySet<AutomationEvent> = new Set([
   'issue.labeled',
   'issue.unlabeled',
   'pull_request.merged',
-  'pull_request.review_requested',
-  'pull_request.rereview_requested',
 ]);
 
 const trusted = (association: string | undefined): boolean =>

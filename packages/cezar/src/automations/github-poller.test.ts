@@ -485,8 +485,17 @@ describe('events an untrusted user can cause (security hardening)', () => {
     expect(matchesFilters(candidate('issue.opened', 'NONE'), withFilters({ authors: ['stranger'] }))).toBe(true);
     expect(matchesFilters(candidate('pull_request.opened', 'NONE'), withFilters({ allowAnyAuthor: true }))).toBe(true);
     expect(matchesFilters(candidate('pull_request.reviewed', 'NONE', { reviewer: 's', reviewerAssociation: 'NONE' }), withFilters({ allowAnyAuthor: true }))).toBe(true);
-    for (const event of ['issue.labeled', 'issue.unlabeled', 'pull_request.merged', 'pull_request.review_requested', 'pull_request.rereview_requested'] as const) {
+    for (const event of ['issue.labeled', 'issue.unlabeled', 'pull_request.merged'] as const) {
       expect(matchesFilters(candidate(event, 'NONE'), definition)).toBe(true);
+    }
+  });
+
+  it('review requests on a stranger PR are gated: CODEOWNERS requests them automatically', () => {
+    for (const event of ['pull_request.review_requested', 'pull_request.rereview_requested'] as const) {
+      expect(matchesFilters(candidate(event, 'NONE', { reviewer: 'me' }), definition)).toBe(false);
+      expect(matchesFilters(candidate(event, 'MEMBER', { reviewer: 'me' }), definition)).toBe(true);
+      expect(matchesFilters(candidate(event, 'NONE', { reviewer: 'me' }), withFilters({ authors: ['stranger'] }))).toBe(true);
+      expect(matchesFilters(candidate(event, 'NONE', { reviewer: 'me' }), withFilters({ allowAnyAuthor: true }))).toBe(true);
     }
   });
 });
