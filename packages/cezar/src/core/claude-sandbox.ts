@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { cezarHomeDir } from '../paths.ts';
@@ -103,8 +103,6 @@ export function claudeSandboxSettings(
     runFiles?: readonly string[];
     /** The run's own TMPDIR. Never the host's: cezar keeps other sessions' settings files there. */
     tempDirs?: readonly string[];
-    /** Entries of cezar's home, for the Read-tool rules (whose deny cannot carve exceptions). */
-    listDir?: (path: string) => string[];
   } = {},
 ): ClaudeSandboxSettings | undefined {
   if (isOff(env.CEZ_AGENT_SANDBOX)) return undefined;
@@ -113,20 +111,15 @@ export function claudeSandboxSettings(
   const home = opts.home ?? homedir();
   const exists = opts.exists ?? existsSync;
 
-  const listDir = opts.listDir ?? ((path: string) => { try { return readdirSync(path); } catch { return []; } });
   const denyHome = isOn(env.CEZ_AGENT_GH_TOKEN) ? [...DENY_READ_HOME] : [...DENY_READ_HOME, GH_CONFIG];
   const extraDeny = list(env.CEZ_AGENT_SANDBOX_DENY_READ);
   const cezarHome = opts.home && !env.CEZ_HOME ? join(opts.home, '.cezar') : cezarHomeDir(env);
   const allowRead = CEZAR_HOME_READABLE.map((p) => join(cezarHome, p));
   // Bash: the whole home, with `allowRead` carving the exceptions back out.
   const denyRead = [...denyHome.map((p) => join(home, p)), cezarHome, ...extraDeny];
-  // Read tool: deny each entry but the exceptions (known secrets too, in case they appear later).
-  const cezarEntries = new Set([...listDir(cezarHome), 'secrets', 'tracker-connections', 'runtime', 'relay', 'agent-homes', 'agent-accounts.json', 'config.json']);
-  const readToolDeny = [
-    ...denyHome.map((p) => join(home, p)),
-    ...[...cezarEntries].filter((e) => !(CEZAR_HOME_READABLE as readonly string[]).includes(e)).map((e) => join(cezarHome, e)),
-    ...extraDeny,
-  ];
+  // Read tool: its deny rules cannot carve exceptions, so the whole home is denied; only the shell
+  // needs the TMPDIR and binary exceptions.
+  const readToolDeny = denyRead;
   // bubblewrap cannot bind a path that does not exist yet.
   const allowWrite = [
     ...[...ALLOW_WRITE_HOME.map((p) => join(home, p)), ...list(env.CEZ_AGENT_SANDBOX_ALLOW_WRITE)].filter((p) => exists(p)),

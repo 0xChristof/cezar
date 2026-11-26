@@ -834,17 +834,11 @@ describe('the run\'s own files outside the worktree stay writable under the sand
     expect(byDefault.sandbox.filesystem.allowWrite.every((p) => p.startsWith('/home/dev/'))).toBe(true);
   });
 
-  it('denies the Read tool every cezar-home entry but tmp, bin and versions; CEZ_HOME is honored', () => {
-    const settings = claudeSandboxSettings({ CEZ_HOME: '/srv/cez' }, {
-      home: '/home/dev', platform: 'linux', exists: () => true,
-      listDir: (p) => (p === '/srv/cez' ? ['tmp', 'bin', 'versions', 'uploads', 'managers'] : []),
-    })!;
+  it('denies the Read tool all of cezar home, entries created later included; CEZ_HOME is honored', () => {
+    const settings = claudeSandboxSettings({ CEZ_HOME: '/srv/cez' }, { home: '/home/dev', platform: 'linux', exists: () => true })!;
     expect(settings.sandbox.filesystem.denyRead).toContain('/srv/cez');
-    const deny = settings.permissions.deny;
-    for (const entry of ['uploads', 'managers', 'secrets', 'relay', 'agent-homes', 'agent-accounts.json']) {
-      expect(deny).toContain(`Read(//srv/cez/${entry}/**)`);
-    }
-    for (const entry of ['tmp', 'bin', 'versions']) expect(deny).not.toContain(`Read(//srv/cez/${entry}/**)`);
+    expect(settings.sandbox.filesystem.allowRead).toEqual(['/srv/cez/tmp', '/srv/cez/bin', '/srv/cez/versions']);
+    expect(settings.permissions.deny).toContain('Read(//srv/cez/**)');
   });
 
   it('buildClaudeArgs passes them from the run env', () => {
