@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -385,7 +386,9 @@ ${http2Block}
 
 /** A vhost-unique rate-limit zone name: two cockpits on one nginx must not share (or redefine) a zone. */
 function zoneSuffix(serverName: string): string {
-  return serverName.replace(/[^A-Za-z0-9]/g, '_').slice(0, 64) || 'default';
+  // The hash keeps `a.b.com` and `a-b.com` (same sanitized spelling) apart.
+  const hash = createHash('sha256').update(serverName).digest('hex').slice(0, 8);
+  return `${serverName.replace(/[^A-Za-z0-9]/g, '_').slice(0, 48)}_${hash}`;
 }
 
 /** Build a privileged command that writes file content atomically (base64 → no quoting hell). */
