@@ -3264,7 +3264,12 @@ export class ManagerEngine {
   private async forward(path: string, init?: { method: string; body?: unknown }): Promise<Response> {
     return this.deps.request(`/api/v1${path}`, {
       method: init?.method ?? 'GET',
-      headers: { host: '127.0.0.1', ...(init?.body !== undefined ? { 'content-type': 'application/json' } : {}) },
+      headers: {
+        host: '127.0.0.1',
+        // In-process, on the manager engine's own behalf (server/api-auth.ts).
+        ...((token): Record<string, string> => (token ? { 'x-cezar-token': token } : {}))(cockpitApiToken()),
+        ...(init?.body !== undefined ? { 'content-type': 'application/json' } : {}),
+      },
       ...(init?.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
     });
   }

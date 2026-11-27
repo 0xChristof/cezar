@@ -34,6 +34,21 @@ describe('check sandbox policy', () => {
   });
 });
 
+describe('a check never carries cockpit API authority', () => {
+  it('drops CEZ_API_TOKEN / CEZ_TASK_TOKEN from whatever env the caller built', async () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'cez-check-env-')));
+    try {
+      const child = spawnCheck('echo "api=${CEZ_API_TOKEN:-none} task=${CEZ_TASK_TOKEN:-none} keep=$KEEP"', cwd, { PATH: process.env.PATH, CEZ_API_TOKEN: 'cockpit', CEZ_TASK_TOKEN: 'task', KEEP: 'yes' });
+      let out = '';
+      child.stdout.on('data', (d: Buffer) => { out += d.toString(); });
+      await new Promise((resolve) => child.on('close', resolve));
+      expect(out.trim()).toBe('api=none task=none keep=yes');
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
 // The real thing: a check under srt (Seatbelt). Linux CI may lack bubblewrap, so macOS only.
 describe.skipIf(process.platform !== 'darwin')('a check under the sandbox (live srt)', () => {
   let root: string;

@@ -22,14 +22,16 @@ export interface ApiAuth {
   cookieName: string;
 }
 
-/** A run's agent, or a manager's (whose CLI drives its own workspace routes). */
-export type TaskGrant = { runId: string; managerId?: undefined } | { managerId: string; runId?: undefined };
+/** A run's agent (in its project), or a manager's (whose CLI drives its own workspace routes). */
+export type TaskGrant =
+  | { runId: string; projectId?: string; managerId?: undefined }
+  | { managerId: string; runId?: undefined; projectId?: undefined };
 
 const taskTokens = new Map<string, TaskGrant>();
 
 function issue(grant: TaskGrant): string {
   for (const [token, held] of taskTokens) {
-    if (held.runId === grant.runId && held.managerId === grant.managerId) return token;
+    if (held.runId === grant.runId && held.managerId === grant.managerId && held.projectId === grant.projectId) return token;
   }
   const token = randomBytes(24).toString('base64url');
   taskTokens.set(token, grant);
@@ -37,8 +39,8 @@ function issue(grant: TaskGrant): string {
 }
 
 /** The run's token (one per run, reused across its spawns); revoked on its terminal transition. */
-export function issueTaskToken(runId: string): string {
-  return issue({ runId });
+export function issueTaskToken(runId: string, projectId?: string): string {
+  return issue(projectId ? { runId, projectId } : { runId });
 }
 
 /** A manager's token: its own `/workspace/managers/<id>` routes and the workflow lists. */
@@ -93,7 +95,9 @@ export function cookieValue(header: string | undefined, name: string): string | 
 }
 
 export function sessionCookie(auth: ApiAuth, secure: boolean): string {
-  const attrs = ['Path=/', 'HttpOnly', 'SameSite=Strict', `Max-Age=${60 * 60 * 24 * 365}`, ...(secure ? ['Secure'] : [])];
+  // Lax, not Strict: a link from another site (the github.com bookmarklet) is a top-level GET that
+  // must arrive signed in; cross-site writes stay refused by the Origin guard, and no GET mutates.
+  const attrs = ['Path=/', 'HttpOnly', 'SameSite=Lax', `Max-Age=${60 * 60 * 24 * 365}`, ...(secure ? ['Secure'] : [])];
   return `${auth.cookieName}=${encodeURIComponent(auth.token)}; ${attrs.join('; ')}`;
 }
 
@@ -149,22 +153,31 @@ export function authenticate(auth: ApiAuth, creds: ApiCredentials): ApiCaller | 
 export function taskRouteAllowed(method: string, path: string, grant: TaskGrant): boolean {
   const escape = (id: string) => encodeURIComponent(id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   if (grant.managerId !== undefined) {
-    return new RegExp(`^/api/v1/workspace/managers/${escape(grant.managerId)}(?:/.*)?$`).test(path)
-      || (method === 'GET' && /^\/api\/v1\/p\/[^/]+\/workflows$/.test(path));
+    const own = new RegExp(`^/api/v1/workspace/managers/${escape(grant.managerId)}(/.*)?$`).exec(path);
+    if (own) {
+      const sub = own[1] ?? '';
+      // The manager itself: read it, rename it (the route narrows the body). Never delete it, and
+      // never decide on its own proposals — those decisions are the person's.
+      if (sub === '' || sub === '/') return method === 'GET' || method === 'PATCH';
+      return !/^\/actions\/[^/]+\/decision\/?$/.test(sub);
+    }
+    return method === 'GET' && /^\/api\/v1\/p\/[^/]+\/workflows$/.test(path);
   }
-  const m = /^\/api\/v1(?:\/p\/[^/]+)?(\/.*)?$/.exec(path);
+  // The run's own project only (CEZ_PROJECT_ID scopes its CLIs); the check poll is unscoped.
+  if (method === 'GET' && /^\/api\/v1\/automation-checks\/[^/]+$/.test(path)) return true;
+  const scope = grant.projectId ? `/p/${escape(grant.projectId)}` : '';
+  const m = new RegExp(`^/api/v1${scope}(/.*)?$`).exec(path);
   if (!m) return false;
   const rest = m[1] ?? '/';
   const own = escape(grant.runId);
   const rules: Array<[string, RegExp]> = [
     ['GET', /^\/runs\/?$/],
-    ['GET', new RegExp(`^/runs/${own}(?:/.*)?$`)],
+    ['GET', new RegExp(`^/runs/${own}$`)],
     ['POST', new RegExp(`^/runs/${own}/(?:dispatch|report)$`)],
-    ['GET', /^\/automations(?:\/[^/]+)?\/?$/],
-    ['GET', /^\/automations\/export$/],
+    // A definition by id, never the export bundle (which `/:id` would otherwise match).
+    ['GET', /^\/automations(?:\/(?!export\/?$)[^/]+)?\/?$/],
     ['POST', /^\/automations\/?$/],
     ['POST', /^\/automations\/[^/]+\/check$/],
-    ['GET', /^\/automation-checks\/[^/]+$/],
     ['GET', /^\/tracker\/automation-options$/],
     ['POST', /^\/tracker\/task$/],
   ];

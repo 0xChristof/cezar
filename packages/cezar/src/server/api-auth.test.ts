@@ -77,7 +77,8 @@ describe('cockpit API authentication (security hardening)', () => {
     const cookie = res.headers.get('set-cookie') ?? '';
     expect(cookie).toContain(`${auth.cookieName}=${auth.token}`);
     expect(cookie).toContain('HttpOnly');
-    expect(cookie).toContain('SameSite=Strict');
+    // Lax: a link from another site (the bookmarklet) must arrive signed in.
+    expect(cookie).toContain('SameSite=Lax');
     expect((await get('/p/default/?token=wrong')).status).toBe(403);
   });
 
@@ -128,18 +129,28 @@ describe('cockpit API authentication (security hardening)', () => {
 
 describe('taskRouteAllowed', () => {
   const grant = { runId: 'r-1' };
-  it('allows the agent CLIs\' routes, project-scoped or not', () => {
+  const scoped = { runId: 'r-1', projectId: 'proj' };
+  it('allows the agent CLIs\' routes, in the run\'s own project only', () => {
     for (const [method, path] of [
       ['GET', '/api/v1/runs'],
-      ['GET', '/api/v1/p/proj/runs/r-1'],
+      ['GET', '/api/v1/runs/r-1'],
       ['POST', '/api/v1/runs/r-1/dispatch'],
-      ['POST', '/api/v1/p/proj/runs/r-1/report'],
       ['POST', '/api/v1/automations'],
-      ['POST', '/api/v1/p/proj/automations/a1/check'],
       ['GET', '/api/v1/automation-checks/c1'],
       ['POST', '/api/v1/tracker/task'],
     ] as const) {
       expect(taskRouteAllowed(method, path, grant), `${method} ${path}`).toBe(true);
+    }
+    for (const [method, path] of [
+      ['GET', '/api/v1/p/proj/runs/r-1'],
+      ['POST', '/api/v1/p/proj/runs/r-1/report'],
+      ['POST', '/api/v1/p/proj/automations/a1/check'],
+      ['GET', '/api/v1/automation-checks/c1'],
+    ] as const) {
+      expect(taskRouteAllowed(method, path, scoped), `${method} ${path}`).toBe(true);
+    }
+    for (const path of ['/api/v1/p/other/runs', '/api/v1/p/other/automations', '/api/v1/runs']) {
+      expect(taskRouteAllowed('GET', path, scoped), path).toBe(false);
     }
   });
   it('refuses everything else', () => {
@@ -154,6 +165,8 @@ describe('taskRouteAllowed', () => {
       ['PUT', '/api/v1/automations/a1'],
       ['DELETE', '/api/v1/automations/a1'],
       ['GET', '/api/v1/secrets'],
+      ['GET', '/api/v1/runs/r-1/terminal'],
+      ['GET', '/api/v1/automations/export'],
       ['GET', '/other'],
     ] as const) {
       expect(taskRouteAllowed(method, path, grant), `${method} ${path}`).toBe(false);
@@ -206,6 +219,10 @@ describe('manager tokens and revocation', () => {
     expect(taskRouteAllowed('GET', '/api/v1/workspace/managers/m2/snapshot', grant)).toBe(false);
     expect(taskRouteAllowed('PUT', '/api/v1/config', grant)).toBe(false);
     expect(taskRouteAllowed('POST', '/api/v1/runs', grant)).toBe(false);
+    // Never delete itself or decide on its own proposals; renaming is narrowed by the route.
+    expect(taskRouteAllowed('PATCH', '/api/v1/workspace/managers/m1', grant)).toBe(true);
+    expect(taskRouteAllowed('DELETE', '/api/v1/workspace/managers/m1', grant)).toBe(false);
+    expect(taskRouteAllowed('POST', '/api/v1/workspace/managers/m1/actions/a1/decision', grant)).toBe(false);
   });
 
   it('a run\'s token stops working once the run is revoked, and a new one is issued after', () => {

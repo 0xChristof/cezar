@@ -2096,7 +2096,7 @@ export class RunManager {
       // is byte-for-byte as before.
       ...(apiUrl ? { CEZ_API_URL: apiUrl } : {}),
       // Scoped to this run's own routes (server/api-auth.ts `taskRouteAllowed`), never the cockpit token.
-      ...(apiUrl ? { CEZ_TASK_TOKEN: issueTaskToken(runId) } : {}),
+      ...(apiUrl ? { CEZ_TASK_TOKEN: issueTaskToken(runId, this.projectId) } : {}),
       ...(apiUrl && this.projectId ? { CEZ_PROJECT_ID: this.projectId } : {}),
       // The cockpit's OWN entrypoint, so an agent runs `node "$CEZ_BIN" task …` and never an older
       // `cez` that happens to be on its PATH without the command (observed on the first live run).
@@ -2240,7 +2240,7 @@ export class RunManager {
         grant.tokens.add(capability);
         this.trackerCapabilities.set(runId, grant);
         this.store.registerRunSecrets(runId, [capability]);
-        Object.assign(trackerEnv, { CEZ_TRACKER_CAPABILITY: capability, CEZ_API_URL: process.env.CEZ_API_URL!, CEZ_TASK_TOKEN: issueTaskToken(runId), CEZ_BIN: process.env.CEZ_BIN!, CEZ_TASK_ID: runId, ...(this.projectId ? { CEZ_PROJECT_ID: this.projectId } : {}) });
+        Object.assign(trackerEnv, { CEZ_TRACKER_CAPABILITY: capability, CEZ_API_URL: process.env.CEZ_API_URL!, CEZ_TASK_TOKEN: issueTaskToken(runId, this.projectId), CEZ_BIN: process.env.CEZ_BIN!, CEZ_TASK_ID: runId, ...(this.projectId ? { CEZ_PROJECT_ID: this.projectId } : {}) });
       }
       trackerContext = trackerPrompt({ binding, ...(context && contextFile ? { context, contextFile } : {}), ...(unavailable ? { unavailable } : {}), commands });
     }
@@ -10545,7 +10545,9 @@ export class RunManager {
       type: 'note',
       message: `auto-land — committing, rebasing${policy.checks.length ? ', running required checks' : ''} and pushing`,
     });
-    const env = { ...process.env, ...this.agentEnv(runId) };
+    const env: NodeJS.ProcessEnv = { ...process.env, ...this.agentEnv(runId) };
+    // Required landing checks run agent-written code: no cockpit authority (server/api-auth.ts).
+    for (const name of Object.keys(env)) if (COCKPIT_SECRET_ENV.includes(name.toUpperCase())) delete env[name];
     const outcome = await landInPlace(this.repoRoot, {
       // From the staged change itself: the title names the first request and goes stale.
       describe: async (staged) => {

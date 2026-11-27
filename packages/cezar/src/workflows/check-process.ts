@@ -11,6 +11,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { hasSignallablePid } from '../core/child-kill-guard.ts';
 import { sandboxedCheckArgv, type CheckSandbox } from './check-sandbox.ts';
+import { COCKPIT_SECRET_ENV } from '../server/api-auth.ts';
 
 const CHECK_GROUPS = process.platform !== 'win32';
 const liveChecks = new Set<ChildProcessWithoutNullStreams>();
@@ -20,7 +21,9 @@ let exitHookInstalled = false;
  * `sandbox` (workflows/check-sandbox.ts) runs the check under `srt`; when `srt` cannot be found the
  * check fails rather than running unsandboxed.
  */
-export function spawnCheck(command: string, cwd: string, env: NodeJS.ProcessEnv, sandbox?: CheckSandbox): ChildProcessWithoutNullStreams {
+export function spawnCheck(command: string, cwd: string, rawEnv: NodeJS.ProcessEnv, sandbox?: CheckSandbox): ChildProcessWithoutNullStreams {
+  // Whatever the caller built, a check never carries cockpit API authority (server/api-auth.ts).
+  const env = Object.fromEntries(Object.entries(rawEnv).filter(([name]) => !COCKPIT_SECRET_ENV.includes(name.toUpperCase())));
   const wrapped = sandbox ? sandboxedCheckArgv(command, sandbox) : undefined;
   const child = sandbox && !wrapped
     ? spawn('bash', ['-c', 'echo "cezar: the check sandbox (@anthropic-ai/sandbox-runtime) is not installed; set CEZ_CHECK_SANDBOX=0 to run checks unsandboxed" >&2; exit 126'], { cwd, env, detached: CHECK_GROUPS })

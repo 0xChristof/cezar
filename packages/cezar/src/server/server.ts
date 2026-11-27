@@ -9668,6 +9668,10 @@ export function createAppParts(deps: ServerDeps) {
       return manager ? c.json(manager) : c.json(MANAGER_NOT_FOUND, 404);
     })
     .patch('/workspace/managers/:id', paramZodValidator(managerIdParamSchema), jsonZodValidator(updateManagerInputSchema), async (c) => {
+      // A manager may rename itself; its access, tools and confirmation stay the person's to change.
+      if (apiCallers.get(c.req.raw)?.kind === 'task' && Object.keys(c.req.valid('json')).some((key) => key !== 'name')) {
+        return c.json({ error: 'forbidden: a manager may only rename itself' }, 403);
+      }
       const updated = await managerEngine.update(c.req.valid('param').id, c.req.valid('json'), { sid: deviceSid(c.req.header('x-cezar-sid')) });
       return 'error' in updated ? c.json({ error: updated.error }, updated.status) : c.json(updated);
     })
