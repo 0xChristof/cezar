@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -184,6 +184,20 @@ describe('resolveApiAuth', () => {
     expect(resolveApiAuth({ CEZ_DESKTOP: '1' }, 4321, 'lease', (m) => warnings.push(m))).toBeUndefined();
     expect(warnings).toHaveLength(1);
     expect(resolveApiAuth({ CEZ_DESKTOP: '1', CEZ_API_TOKEN: 'given' }, 4321, 'lease')?.token).toBe('given');
+  });
+
+  it('reads a token file (CEZ_API_TOKEN_FILE) so the secret never sits in the environment', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cez-token-file-'));
+    try {
+      const file = join(dir, 'token');
+      writeFileSync(file, 'from-file\n', { mode: 0o600 });
+      expect(resolveApiAuth({ CEZ_DESKTOP: '1', CEZ_API_TOKEN_FILE: file }, 4321, 'lease')).toMatchObject({ token: 'from-file', alsoAccept: ['lease'] });
+      const warnings: string[] = [];
+      expect(resolveApiAuth({ CEZ_API_TOKEN_FILE: join(dir, 'missing') }, 4321, 'lease', (m) => warnings.push(m))?.token).toBe('lease');
+      expect(warnings[0]).toContain('could not be read');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

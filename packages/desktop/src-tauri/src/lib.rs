@@ -1446,8 +1446,9 @@ fn spawn_sidecar(entry: &Path, port: u16, project: Option<&Path>, log: Arc<Mutex
         // not read fails getcwd, and cezar exited 1 before answering (telemetry 5af5aec6).
         .current_dir(home_dir())
         .env("CEZ_DESKTOP", "1")
-        // With a token the cockpit keeps its API authentication on under the shell.
-        .env("CEZ_API_TOKEN", cockpit_token())
+        // With a token the cockpit keeps its API authentication on under the shell. It travels as a
+        // 0600 file under cezar's home (which agents' sandboxes cannot read), never as an env value.
+        .envs(cockpit_token_file().map(|path| ("CEZ_API_TOKEN_FILE", path)))
         .env("CEZ_SUPERVISED", "1")
         // cezar polls this pid and exits when it is gone — a force-quit of the shell never
         // leaves a headless cockpit behind (the Exit handler only runs on a clean quit).
@@ -2552,6 +2553,30 @@ pub(crate) fn cockpit_token() -> &'static str {
     })
 }
 
+/// `cockpit_token()` written 0600 to `~/.cezar/runtime/desktop-api-token` for the sidecar to read.
+/// None when it cannot be written: the cockpit then runs without auth and says so.
+fn cockpit_token_file() -> Option<PathBuf> {
+    let dir = cezar_home().join("runtime");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("desktop-api-token");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok()?;
+    }
+    use std::io::Write;
+    file.write_all(cockpit_token().as_bytes()).ok()?;
+    Some(path)
+}
+
 /// The cockpit page that signs the webview in (the server swaps `?token=` for its session cookie).
 fn cockpit_login_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}/?token={}", cockpit_token())
@@ -2859,6 +2884,17 @@ mod tests {
         assert_eq!(signed_in("http://localhost:4321/p/a?from=x", "t0k"), "http://localhost:4321/p/a?from=x&token=t0k");
         assert_eq!(signed_in("http://localhost:4321/", "t0k"), "http://localhost:4321/?token=t0k");
         assert_eq!(signed_in("not a url", "t0k"), "not a url");
+    }
+
+    #[test]
+    fn the_token_file_is_private_and_holds_the_token() {
+        let path = cockpit_token_file().expect("token file");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), cockpit_token());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
     }
 
     #[test]

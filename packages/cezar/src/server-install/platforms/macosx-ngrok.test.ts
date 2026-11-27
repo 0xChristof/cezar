@@ -69,9 +69,11 @@ describe('macosx-ngrok', () => {
     expect(c).toContain('request_header:');
     expect(c).toContain('- "x-cezar-token: ab12"');
     expect(ngrokTunnelConfig(4321, 'ops:x')).not.toContain('request_header');
-    const plist = cezarLaunchdPlist('/repo', 4321, ['/usr/bin/node', '/app/dist/index.js'], undefined, 'ab12');
-    expect(plist).toContain('<key>CEZ_API_TOKEN</key>');
-    expect(plist).toContain('<string>ab12</string>');
+    // The agent gets the token's PATH, never the value (an env value is inspectable).
+    const plist = cezarLaunchdPlist('/repo', 4321, ['/usr/bin/node', '/app/dist/index.js'], undefined, '/home/u/tok');
+    expect(plist).toContain('<key>CEZ_API_TOKEN_FILE</key>');
+    expect(plist).toContain('<string>/home/u/tok</string>');
+    expect(plist).not.toContain('<key>CEZ_API_TOKEN</key>');
     expect(cezarLaunchdPlist('/repo', 4321, ['/usr/bin/node', '/app/dist/index.js'])).not.toContain('CEZ_API_TOKEN');
   });
 

@@ -20,11 +20,11 @@ const plistPath = (): string => join(homedir(), 'Library', 'LaunchAgents', `${PL
 const tunnelConfigPath = (): string => join(homedir(), 'Library', 'Application Support', 'cezar', 'ngrok-tunnel.yml');
 /**
  * The hosted cockpit's API token (cezar `server/api-auth.ts`), shared by the cockpit agent
- * (`CEZ_API_TOKEN`) and the tunnel, which adds it to every request that passed basic auth — so a
+ * (`CEZ_API_TOKEN_FILE`, the path, never the value) and the tunnel, which adds it to every request that passed basic auth — so a
  * browser or the iOS app in hosted mode is signed in, while agents on this Mac, which reach the
  * cockpit on loopback without passing the tunnel, are not. 0600, created once.
  */
-const hostedTokenPath = (): string => join(homedir(), 'Library', 'Application Support', 'cezar', 'api-token');
+export const hostedTokenPath = (): string => join(homedir(), 'Library', 'Application Support', 'cezar', 'api-token');
 export function hostedApiToken(path = hostedTokenPath()): string {
   try {
     const existing = readFileSync(path, 'utf8').trim();
@@ -284,7 +284,7 @@ async function resolveCezarArgv(ctx: InstallContext): Promise<string[]> {
 }
 
 /** launchd agent that keeps the cezar cockpit running on the given port. */
-export function cezarLaunchdPlist(repoRoot: string, port: number, argv: string[], instanceId?: string, apiToken?: string): string {
+export function cezarLaunchdPlist(repoRoot: string, port: number, argv: string[], instanceId?: string, apiTokenFile?: string): string {
   // Give the agent the operator's PATH so cezar can spawn claude/gh/codex.
   const pathDirs = [dirname(process.execPath), ...(process.env.PATH ?? '').split(':'), '/usr/local/bin', '/usr/bin', '/bin']
     .filter((d, i, a) => d && d !== '.' && a.indexOf(d) === i);
@@ -307,7 +307,7 @@ ${argXml}
     <dict>
       <key>CEZ_REMOTE</key>
       <string>1</string>
-${instanceId ? `      <key>CEZ_INSTANCE_ID</key>\n      <string>${escapeXml(instanceId)}</string>\n` : ''}${apiToken ? `      <key>CEZ_API_TOKEN</key>\n      <string>${escapeXml(apiToken)}</string>\n` : ''}      <key>PATH</key>
+${instanceId ? `      <key>CEZ_INSTANCE_ID</key>\n      <string>${escapeXml(instanceId)}</string>\n` : ''}${apiTokenFile ? `      <key>CEZ_API_TOKEN_FILE</key>\n      <string>${escapeXml(apiTokenFile)}</string>\n` : ''}      <key>PATH</key>
       <string>${escapeXml(pathDirs.join(':'))}</string>
     </dict>
     <key>RunAtLoad</key>
@@ -333,7 +333,8 @@ const autostartStep: InstallStep = {
       ctx.ui.info(`DRY RUN — would write ${path} and launchctl bootstrap it.`);
     } else {
       mkdirSync(join(homedir(), 'Library', 'LaunchAgents'), { recursive: true });
-      writeFileSync(path, cezarLaunchdPlist(ctx.repoRoot, ctx.state.primaryPort, argv, ctx.state.instanceId, hostedApiToken()), { encoding: 'utf8', mode: 0o600 });
+      hostedApiToken(); // created before the agent first reads it
+      writeFileSync(path, cezarLaunchdPlist(ctx.repoRoot, ctx.state.primaryPort, argv, ctx.state.instanceId, hostedTokenPath()), { encoding: 'utf8', mode: 0o600 });
       chmodSync(path, 0o600);
       const uid = process.getuid ? process.getuid() : 0;
       await ctx.runner.capture('launchctl', ['bootout', `gui/${uid}/${CEZAR_PLIST_LABEL}`]);

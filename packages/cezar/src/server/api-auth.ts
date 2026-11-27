@@ -1,4 +1,5 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 /**
  * Cockpit API authentication (security hardening). The cockpit binds to loopback, but loopback is
@@ -60,7 +61,7 @@ export function cockpitApiToken(): string | undefined {
 }
 
 /** Env names that carry cockpit authority and must never be inherited by an agent or a check. */
-export const COCKPIT_SECRET_ENV: readonly string[] = ['CEZ_API_TOKEN', 'CEZ_TASK_TOKEN'];
+export const COCKPIT_SECRET_ENV: readonly string[] = ['CEZ_API_TOKEN', 'CEZ_API_TOKEN_FILE', 'CEZ_TASK_TOKEN'];
 
 export function revokeTaskTokens(runId: string): void {
   for (const [token, grant] of taskTokens) if (grant.runId === runId) taskTokens.delete(token);
@@ -113,7 +114,18 @@ export function resolveApiAuth(
   warn: (message: string) => void = (m) => console.warn(m),
 ): ApiAuth | undefined {
   if (env.CEZ_API_AUTH === '0') return undefined;
-  const explicit = env.CEZ_API_TOKEN?.trim();
+  // A supervisor hands the token over as a 0600 file (CEZ_API_TOKEN_FILE): a value in the
+  // environment would sit in this process's env for anything able to inspect it.
+  const fromFile = (() => {
+    if (!env.CEZ_API_TOKEN_FILE) return undefined;
+    try {
+      return readFileSync(env.CEZ_API_TOKEN_FILE, 'utf8').trim() || undefined;
+    } catch {
+      warn(`  ⚠ CEZ_API_TOKEN_FILE could not be read (${env.CEZ_API_TOKEN_FILE}); using the runtime lease token.`);
+      return undefined;
+    }
+  })();
+  const explicit = fromFile ?? env.CEZ_API_TOKEN?.trim();
   if (!explicit && env.CEZ_DESKTOP === '1') {
     warn('  ⚠ cockpit API authentication is off under the desktop shell (it cannot pass a token yet): agents on this machine can reach the cockpit API.');
     return undefined;
