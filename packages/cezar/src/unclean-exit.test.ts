@@ -268,7 +268,8 @@ describe('reportUncleanExits', () => {
     vi.unstubAllEnvs();
   });
 
-  it('reports every dead cockpit found at one start, each under its own version', async () => {
+  // Telemetry is removed in this fork: the reports are built but never leave the machine.
+  it('finds every dead cockpit at one start, and sends nothing', async () => {
     vi.stubGlobal('fetch', fetchMock);
     vi.stubEnv('CEZ_TELEMETRY', '1');
     vi.stubEnv('CEZ_HOME', mkdtempSync(join(tmpdir(), 'cez-unclean-')));
@@ -281,8 +282,8 @@ describe('reportUncleanExits', () => {
       .map((call) => call as unknown as [string, RequestInit])
       .filter(([url]) => url.endsWith('/track/error'))
       .map(([, init]) => JSON.parse(String(init.body)));
-    expect(bodies.map((b) => b.version).sort()).toEqual(['0.20.0', '0.21.0-nightly']);
-    expect(bodies.every((b) => b.error.type === 'UncleanShutdown' && b.error.code === 'unclean_shutdown' && !b.error.stack)).toBe(true);
+    expect(bodies).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

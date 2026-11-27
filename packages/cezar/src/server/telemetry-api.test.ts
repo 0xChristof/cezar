@@ -197,18 +197,15 @@ describe('telemetry routes', () => {
     });
     afterEach(() => vi.unstubAllEnvs());
 
-    it('starts unanswered, and says when the server could never send', async () => {
+    // Telemetry is removed in this fork (telemetry.ts): always off, a yes is not recorded.
+    it('is always off and blocked, so the cockpit never asks', async () => {
       const body = telemetryConsentSchema.parse(await (await apiRequest(app(), '/api/v1/telemetry/consent')).json());
-      expect(body).toMatchObject({ consent: 'unknown', policyVersion: TELEMETRY_POLICY_VERSION, blockedBy: 'automation' });
-      vi.stubEnv('DO_NOT_TRACK', '1');
-      expect((await consentOf(await apiRequest(app(), '/api/v1/telemetry/consent'))).blockedBy).toBe('env');
+      expect(body).toMatchObject({ consent: 'denied', policyVersion: TELEMETRY_POLICY_VERSION, blockedBy: 'env' });
     });
 
-    it('records a yes and a no in the workspace config', async () => {
-      expect((await consentOf(await put({ consent: 'granted' }))).consent).toBe('granted');
-      expect((await loadWorkspaceConfig()).telemetry?.consent).toBe('granted');
-      expect((await consentOf(await put({ consent: 'denied' }))).consent).toBe('denied');
-      expect((await consentOf(await apiRequest(app(), '/api/v1/telemetry/consent'))).consent).toBe('denied');
+    it('cannot be turned on, and records nothing', async () => {
+      expect((await consentOf(await put({ consent: 'granted' }))).consent).toBe('denied');
+      expect((await loadWorkspaceConfig()).telemetry).toBeUndefined();
     });
 
     it('refuses anything but an explicit answer', async () => {
