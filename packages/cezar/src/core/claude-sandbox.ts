@@ -38,10 +38,19 @@ const GH_CONFIG = '.config/gh';
  * tokens, so all of it is unreadable except what a run needs: its TMPDIR and the `cez` binary.
  */
 const CEZAR_HOME_READABLE = ['tmp', 'bin', 'versions'] as const;
-/** cezar's own credential stores, denied by name in case they appear after a run's launch. */
-const CEZAR_HOME_SECRETS = [
-  'secrets', 'tracker-connections', 'runtime', 'relay', 'agent-homes', 'agent-accounts.json',
-  'config.json', 'instances', 'server-instances', 'server.json', 'managers.json', 'uploads', 'telemetry',
+/**
+ * Every top-level entry cezar itself creates in its home (`claude-sandbox.test.ts` greps the
+ * sources so this list cannot drift). When a run's root lives under cezar's home, the Read tool is
+ * denied each of these by name on top of the launch-time listing, so nothing cezar writes later
+ * slips through. Only the path down to the run's own root is left open.
+ */
+export const CEZAR_HOME_ENTRIES = [
+  'agent-accounts.json', 'agent-fallback.json', 'agent-homes', 'agent-usage-holds',
+  'attention-overrides.json', 'attention-pr-ends.json', 'bin', 'cache', 'codex-restricted',
+  'codex-restricted-dry-source', 'config.json', 'instances', 'logs', 'managers', 'managers.json',
+  'npm-cache', 'opencode-servers', 'pr-checkouts', 'relay', 'runtime', 'secrets', 'server-instances',
+  'server.install.lock', 'server.json', 'telemetry', 'tmp', 'tracker-connections', 'ui-state.json',
+  'uploads', 'usage-ledger', 'usage-tracking.json', 'usage-windows.json', 'versions',
 ] as const;
 
 /**
@@ -197,10 +206,10 @@ export function claudeSandboxSettings(
     if (!carvable.includes(p)) return [p];
     const within = runRoots.filter((r) => inside(p, r));
     if (within.length === 0) return [p];
-    // The listing is a launch-time snapshot: name cezar's known secret stores too, so one created
+    // The listing is a launch-time snapshot: name every entry cezar creates too, so one created
     // later is still denied.
     const known = p === cezarHome
-      ? CEZAR_HOME_SECRETS.map((n) => join(p, n)).filter((k) => !within.some((r) => inside(k, r)))
+      ? CEZAR_HOME_ENTRIES.map((n) => join(p, n)).filter((k) => !within.some((r) => inside(k, r)))
       : [];
     return [...new Set([...aroundRoots(p, within), ...known])];
   });
