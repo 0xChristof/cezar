@@ -555,6 +555,7 @@ export interface ClaudeSandboxRun {
   tempDirs?: readonly string[];
   projectRoots?: readonly string[];
   readableRoots?: readonly string[];
+  binRoots?: readonly string[];
 }
 
 /** What the sandbox must know about this run: its own files outside the worktree that its shell
@@ -570,8 +571,8 @@ export function sandboxRunOf(spec: Pick<AgentRunSpec, 'cwd' | 'env' | 'additiona
       join(project, '.git'),
       ...(spec.additionalDirectories ?? []),
       ...(spec.artifactsWriteDir ? [spec.artifactsWriteDir] : []),
-      ...[cezInstallRoot(env.CEZ_BIN)].filter((p): p is string => Boolean(p)),
     ],
+    binRoots: [cezInstallRoot(env.CEZ_BIN)].filter((p): p is string => Boolean(p)),
   };
 }
 

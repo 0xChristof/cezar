@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import { cezarHomeDir } from '../paths.ts';
@@ -133,9 +133,13 @@ export function claudeSandboxSettings(
     /** Extra roots the secret-file patterns are anchored under (the project, when outside home). */
     projectRoots?: readonly string[];
     /** What the run itself must read even inside a denied directory (`CEZ_AGENT_SANDBOX_DENY_READ`):
-     *  its worktree, the project's `.git`, its `--add-dir` dirs, the `cez` install. A pattern deny
-     *  still wins over these, so a `.env` inside them stays unreadable. */
+     *  its worktree, the project's `.git`, its `--add-dir` dirs. A pattern deny still wins over
+     *  these (verified), so a `.env` inside them stays unreadable. */
     readableRoots?: readonly string[];
+    /** The `cez` install: readable by the shell inside a denied directory, never by the Read tool. */
+    binRoots?: readonly string[];
+    /** Directory listing for the Read-tool rules of a denied directory that holds the run. */
+    listDir?: (path: string) => string[];
   } = {},
 ): ClaudeSandboxSettings | undefined {
   if (isOff(env.CEZ_AGENT_SANDBOX)) return undefined;
@@ -147,20 +151,37 @@ export function claudeSandboxSettings(
   const denyHome = isOn(env.CEZ_AGENT_GH_TOKEN) ? [...DENY_READ_HOME] : [...DENY_READ_HOME, GH_CONFIG];
   const extraDeny = list(env.CEZ_AGENT_SANDBOX_DENY_READ);
   const cezarHome = opts.home && !env.CEZ_HOME ? join(opts.home, '.cezar') : cezarHomeDir(env);
-  const allowRead = [
-    ...CEZAR_HOME_READABLE.map((p) => join(cezarHome, p)),
-    ...[...new Set(opts.readableRoots ?? [])].filter(Boolean),
-  ];
+  const inside = (root: string, path: string) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
+  const credentialDirs = [home, cezarHome, ...denyHome.map((p) => join(home, p))];
+  // A carve-out is only for a run root inside an extra deny dir, and never one that holds home,
+  // cezar's home or a credential store: a broad allow must not reopen what a narrow deny closed.
+  const carve = (roots: readonly string[] | undefined) => [...new Set(roots ?? [])].filter((r) =>
+    r && extraDeny.some((d) => inside(d, r)) && !credentialDirs.some((c) => inside(r, c)));
+  const runRoots = carve(opts.readableRoots);
+  const allowRead = [...CEZAR_HOME_READABLE.map((p) => join(cezarHome, p)), ...runRoots, ...carve(opts.binRoots)];
   const secretRoots = [...new Set([home, ...(opts.projectRoots ?? [])])].filter(Boolean);
   const secretPatterns = secretRoots.flatMap((root) => SECRET_FILE_PATTERNS.flatMap((p) => [join(root, p), join(root, '**', p)]));
   // Bash: the whole cezar home, with `allowRead` carving the exceptions back out.
   const denyRead = [...denyHome.map((p) => join(home, p)), cezarHome, ...secretPatterns, ...extraDeny];
-  // Read tool: its deny rules cannot carve exceptions, so the whole cezar home is denied (the run
-  // needs none of it through Read). An extra deny dir that contains one of the run's own roots is
-  // left to the OS sandbox, which enforces it for Bash; denying it here would deny the worktree.
-  const inside = (root: string, path: string) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
-  const readable = opts.readableRoots ?? [];
-  const readToolDeny = denyRead.filter((p) => !(extraDeny.includes(p) && readable.some((r) => inside(p, r))));
+  // Read tool: its deny rules cannot carve exceptions, so the whole cezar home is denied, and an
+  // extra deny dir that holds the run is denied entry by entry around the path to the run's roots.
+  // A listing that fails denies the whole dir (fail closed).
+  const listDir = opts.listDir ?? ((path: string) => readdirSync(path));
+  const aroundRoots = (dir: string, roots: string[]): string[] => {
+    if (roots.some((r) => r === dir)) return [];
+    let entries: string[];
+    try { entries = listDir(dir); } catch { return [dir]; }
+    return entries.flatMap((name) => {
+      const child = join(dir, name);
+      const within = roots.filter((r) => inside(child, r));
+      return within.length > 0 ? aroundRoots(child, within) : [child];
+    });
+  };
+  const readToolDeny = denyRead.flatMap((p) => {
+    if (!extraDeny.includes(p)) return [p];
+    const within = runRoots.filter((r) => inside(p, r));
+    return within.length > 0 ? aroundRoots(p, within) : [p];
+  });
   // bubblewrap cannot bind a path that does not exist yet.
   const allowWrite = [
     ...[...ALLOW_WRITE_HOME.map((p) => join(home, p)), ...list(env.CEZ_AGENT_SANDBOX_ALLOW_WRITE)].filter((p) => exists(p)),
