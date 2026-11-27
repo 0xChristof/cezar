@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
-const DEFAULT_URL: &str = "https://stats.openmercato.cloud";
+/// Telemetry is removed in this fork: no endpoint, and `send` never touches the network.
+const DEFAULT_URL: &str = "";
 /// `TELEMETRY_POLICY_VERSION` in packages/cezar/src/telemetry.ts. A bump there stops these
 /// reports until this is bumped too — the shell fails closed, never open.
 const POLICY_VERSION: u64 = 1;
@@ -152,8 +153,9 @@ pub fn install_panic_hook() {
     }));
 }
 
+/// Always blocked: telemetry is removed in this fork, so nothing is reported, offered or sent.
 fn blocked_here() -> bool {
-    cfg!(test) || blocked(&|name| std::env::var(name).ok())
+    true
 }
 
 fn read_config() -> Option<Value> {
@@ -291,17 +293,9 @@ fn shell_version() -> String {
     }
 }
 
-fn send(url: &str, body: &Value) -> bool {
-    let debug = std::env::var_os("CEZ_TELEMETRY_DEBUG").is_some_and(|v| v == "1");
-    let result = tauri::async_runtime::block_on(async {
-        let client = crate::node_runtime::client()?;
-        let response = client.post(url).timeout(TIMEOUT).json(body).send().await.map_err(|e| e.to_string())?;
-        Ok::<_, String>(response.status())
-    });
-    if debug {
-        eprintln!("[telemetry] {url} → {result:?}\n    {body}");
-    }
-    result.is_ok_and(|status| status.is_success())
+/// No network: telemetry is removed in this fork.
+fn send(_url: &str, _body: &Value) -> bool {
+    false
 }
 
 #[cfg(test)]
