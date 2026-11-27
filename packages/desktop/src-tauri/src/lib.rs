@@ -843,9 +843,10 @@ pub fn run() {
                     .filter(|url| url.scheme() == "http")
                     .map(browser_url);
                 let port = shell_for_menu.port.load(Ordering::SeqCst);
+                // The browser has no session yet: open it signed in (cezar `server/api-auth.ts`).
                 match current {
-                    Some(url) => open_url(&url),
-                    None if port != 0 => open_url(&format!("http://localhost:{port}")),
+                    Some(url) => open_url(&signed_in(&url, cockpit_token())),
+                    None if port != 0 => open_url(&signed_in(&format!("http://localhost:{port}/"), cockpit_token())),
                     None => {}
                 }
             }
@@ -1007,7 +1008,7 @@ fn supervise(app: AppHandle, shell: Arc<Shell>) {
         };
         let pid = child.id();
 
-        let url = format!("http://127.0.0.1:{port}");
+        let url = cockpit_login_url(port);
         if let Some(version) = wait_for_health(port, &mut child, HEALTH_TIMEOUT) {
             *shell.running_version.lock().unwrap() = Some(version);
             *shell.update_available.lock().unwrap() = None;
@@ -1445,6 +1446,8 @@ fn spawn_sidecar(entry: &Path, port: u16, project: Option<&Path>, log: Arc<Mutex
         // not read fails getcwd, and cezar exited 1 before answering (telemetry 5af5aec6).
         .current_dir(home_dir())
         .env("CEZ_DESKTOP", "1")
+        // With a token the cockpit keeps its API authentication on under the shell.
+        .env("CEZ_API_TOKEN", cockpit_token())
         .env("CEZ_SUPERVISED", "1")
         // cezar polls this pid and exits when it is gone — a force-quit of the shell never
         // leaves a headless cockpit behind (the Exit handler only runs on a clean quit).
@@ -2005,6 +2008,17 @@ fn browser_url(mut url: url::Url) -> String {
     url.to_string()
 }
 
+/// `raw` with `?token=` added: the cockpit swaps it for a session cookie and drops it from the address.
+fn signed_in(raw: &str, token: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(mut url) => {
+            url.query_pairs_mut().append_pair("token", token);
+            url.to_string()
+        }
+        Err(_) => raw.to_string(),
+    }
+}
+
 /// What the OS may be asked to open on a page's behalf (GHSA-7359-xf8g-8826): a web or mail
 /// address, re-serialized by the parser. Any other scheme (`file:`, `ms-msdt:`, `search-ms:`, …)
 /// launches a local handler, so it is dropped.
@@ -2514,6 +2528,35 @@ fn send_error_report(window: WebviewWindow) {
     });
 }
 
+/// The cockpit API token this shell hands its sidecar (`CEZ_API_TOKEN`, cezar's
+/// `server/api-auth.ts`): one per app process, so a relaunched cockpit keeps the webview's session.
+/// The webview signs in by opening the cockpit with `?token=`; the notch sends it as a header.
+pub(crate) fn cockpit_token() -> &'static str {
+    static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TOKEN.get_or_init(|| {
+        let mut bytes = [0u8; 32];
+        let random = std::fs::File::open("/dev/urandom").and_then(|mut f| {
+            use std::io::Read;
+            f.read_exact(&mut bytes)
+        });
+        if random.is_err() {
+            // No /dev/urandom (Windows): the std hasher's keys come from the OS RNG.
+            use std::hash::{BuildHasher, Hasher};
+            for chunk in bytes.chunks_mut(8) {
+                let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+                hasher.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+                chunk.copy_from_slice(&hasher.finish().to_le_bytes()[..chunk.len()]);
+            }
+        }
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    })
+}
+
+/// The cockpit page that signs the webview in (the server swaps `?token=` for its session cookie).
+fn cockpit_login_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/?token={}", cockpit_token())
+}
+
 fn app_origin() -> &'static str {
     if cfg!(windows) {
         "http://tauri.localhost/index.html"
@@ -2809,6 +2852,22 @@ mod tests {
         assert_eq!(openable_url("ms-msdt:/id PCWDiagnostic"), None);
         assert_eq!(openable_url("search-ms:query=x"), None);
         assert_eq!(openable_url("not a url"), None);
+    }
+
+    #[test]
+    fn signed_in_adds_the_token_and_keeps_the_rest() {
+        assert_eq!(signed_in("http://localhost:4321/p/a?from=x", "t0k"), "http://localhost:4321/p/a?from=x&token=t0k");
+        assert_eq!(signed_in("http://localhost:4321/", "t0k"), "http://localhost:4321/?token=t0k");
+        assert_eq!(signed_in("not a url", "t0k"), "not a url");
+    }
+
+    #[test]
+    fn the_cockpit_token_is_stable_random_hex_and_signs_in_the_webview() {
+        let token = cockpit_token();
+        assert_eq!(token.len(), 64);
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(cockpit_token(), token);
+        assert_eq!(cockpit_login_url(4321), format!("http://127.0.0.1:4321/?token={token}"));
     }
 
     #[test]

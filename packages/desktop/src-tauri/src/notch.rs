@@ -165,7 +165,10 @@ fn fetch_managers(port: u16) -> Fetched {
     let Ok(address) = format!("127.0.0.1:{port}").parse() else { return Fetched::Failed };
     let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) else { return Fetched::Failed };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let request = format!("GET /api/v1/workspace/managers HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    let request = format!(
+        "GET /api/v1/workspace/managers HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nx-cezar-token: {}\r\nConnection: close\r\n\r\n",
+        crate::cockpit_token()
+    );
     if stream.write_all(request.as_bytes()).is_err() {
         return Fetched::Failed;
     }
