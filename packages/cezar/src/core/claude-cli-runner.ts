@@ -601,7 +601,9 @@ export function withClaudeSandbox(
   const permissions = own('permissions');
   const deny = Array.isArray(permissions.deny) ? permissions.deny : [];
   const merged = { ...permissions, deny: [...deny, ...os.permissions.deny] };
-  if (run.bash === false) return { ...settings, permissions: merged };
+  // Without the sandbox, Bash must be impossible, not merely ungranted: a deny rule outranks
+  // bypassPermissions and any settings `allow` (a repo's own .claude/settings.json included).
+  if (run.bash === false) return { ...settings, permissions: { ...merged, deny: [...merged.deny, 'Bash'] } };
   return {
     ...settings,
     sandbox: { ...os.sandbox, ...own('sandbox') },
