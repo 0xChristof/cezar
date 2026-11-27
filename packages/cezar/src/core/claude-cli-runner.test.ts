@@ -19,11 +19,12 @@ import {
   claudeMcpServers,
   writeClaudeSettingsFile,
   withClaudeSandbox,
+  sandboxRunOf,
   EOF_KILL_GRACE_MS,
   EOF_TERM_GRACE_MS,
   KILL_GRACE_MS,
 } from './claude-cli-runner.ts';
-import { claudeSandboxSettings } from './claude-sandbox.ts';
+import { cezInstallRoot, claudeSandboxSettings, projectRootOf, SECRET_FILE_PATTERNS } from './claude-sandbox.ts';
 import { recordOwnSignal, resetOwnSignalsForTests } from './process-signals.ts';
 import { ClaudeSessionCost, resetClaudeSessionCosts } from './claude-session-cost.ts';
 import type { UiEvent } from './ui-events.ts';
@@ -846,5 +847,42 @@ describe('the run\'s own files outside the worktree stay writable under the sand
     const settings = JSON.parse(args[args.indexOf('--settings') + 1]!) as { sandbox: { filesystem: { allowWrite: string[] } } };
     if (process.platform === 'darwin') expect(settings.sandbox.filesystem.allowWrite).toEqual(expect.arrayContaining([runEnv.CEZ_HANDOFF_FILE]));
     expect(settings.sandbox.filesystem.allowWrite).not.toContain('/repo/.ai/cezar');
+  });
+});
+
+describe('secret files (.env, keys) and the run\'s own roots under the sandbox', () => {
+  const home = '/home/dev';
+
+  it('denies secret-file patterns under home and the project, to Bash and the Read tool alike', () => {
+    const settings = claudeSandboxSettings({}, { home, platform: 'linux', exists: () => true, projectRoots: ['/srv/repo'] })!;
+    const deny = settings.sandbox.filesystem.denyRead;
+    for (const root of [home, '/srv/repo']) {
+      expect(deny).toEqual(expect.arrayContaining([`${root}/**/.env`, `${root}/.env`, `${root}/**/.env.local`, `${root}/**/*.pem`, `${root}/**/id_ed25519`]));
+      expect(settings.permissions.deny).toContain(`Read(/${root}/**/.env)`);
+    }
+    expect(SECRET_FILE_PATTERNS).not.toContain('.env.example');
+    expect(SECRET_FILE_PATTERNS).not.toContain('.env.test');
+  });
+
+  it('keeps the run\'s own roots readable inside an extra denied dir, but not for the Read tool rule that would hide them', () => {
+    const settings = claudeSandboxSettings({ CEZ_AGENT_SANDBOX_DENY_READ: '/home/dev/code,/srv/other' }, {
+      home, platform: 'linux', exists: () => true, readableRoots: ['/home/dev/code/app/.ai/cezar/worktrees/r1', '/home/dev/code/app/.git'],
+    })!;
+    expect(settings.sandbox.filesystem.denyRead).toEqual(expect.arrayContaining(['/home/dev/code', '/srv/other']));
+    expect(settings.sandbox.filesystem.allowRead).toEqual(expect.arrayContaining(['/home/dev/code/app/.ai/cezar/worktrees/r1', '/home/dev/code/app/.git']));
+    expect(settings.permissions.deny).not.toContain('Read(//home/dev/code/**)');
+    expect(settings.permissions.deny).toContain('Read(//srv/other/**)');
+  });
+
+  it('derives the project, its .git and the cez install from the run', () => {
+    expect(projectRootOf('/home/dev/code/app/.ai/cezar/worktrees/r1')).toBe('/home/dev/code/app');
+    expect(projectRootOf('/home/dev/code/app')).toBe('/home/dev/code/app');
+    const exists = (p: string) => ['/home/dev/code/cezar/package.json', '/home/dev/code/cezar/packages/cezar/package.json'].includes(p);
+    expect(cezInstallRoot('/home/dev/code/cezar/packages/cezar/dist/index.js', home, exists)).toBe('/home/dev/code/cezar');
+    expect(cezInstallRoot(undefined, home, exists)).toBeUndefined();
+    const run = sandboxRunOf({ cwd: '/home/dev/code/app/.ai/cezar/worktrees/r1', env: { TMPDIR: '/t/r1' }, additionalDirectories: ['/home/dev/code/app/.ai/cezar/runs'] }, {});
+    expect(run.projectRoots).toEqual(['/home/dev/code/app']);
+    expect(run.readableRoots).toEqual(expect.arrayContaining(['/home/dev/code/app/.ai/cezar/worktrees/r1', '/home/dev/code/app/.git', '/home/dev/code/app/.ai/cezar/runs']));
+    expect(run.tempDirs).toEqual(['/t/r1']);
   });
 });

@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { cezarHomeDir } from '../paths.ts';
 
 /**
@@ -38,6 +38,33 @@ const GH_CONFIG = '.config/gh';
  * tokens, so all of it is unreadable except what a run needs: its TMPDIR and the `cez` binary.
  */
 const CEZAR_HOME_READABLE = ['tmp', 'bin', 'versions'] as const;
+
+/**
+ * Secret-bearing file names, denied by pattern under the home and project roots: the sandbox
+ * enforces them for every process (`node -e`, scripts), not just a `cat` Claude can parse.
+ * Exact names, not `.env.*`: a pattern cannot carve out `.env.example`, which agents need.
+ * `.env.test` stays readable too (commonly committed test config).
+ */
+export const SECRET_FILE_PATTERNS = [
+  '.env',
+  '.env.local',
+  '.env.*.local',
+  '.env.development',
+  '.env.dev',
+  '.env.production',
+  '.env.prod',
+  '.env.staging',
+  '.envrc',
+  '*.pem',
+  '*.key',
+  '*.p12',
+  '*.pfx',
+  '*.keystore',
+  '*.jks',
+  'id_rsa',
+  'id_ecdsa',
+  'id_ed25519',
+] as const;
 
 /** Package-manager caches a build legitimately writes; only those that exist are granted. */
 const ALLOW_WRITE_HOME = [
@@ -103,6 +130,12 @@ export function claudeSandboxSettings(
     runFiles?: readonly string[];
     /** The run's own TMPDIR. Never the host's: cezar keeps other sessions' settings files there. */
     tempDirs?: readonly string[];
+    /** Extra roots the secret-file patterns are anchored under (the project, when outside home). */
+    projectRoots?: readonly string[];
+    /** What the run itself must read even inside a denied directory (`CEZ_AGENT_SANDBOX_DENY_READ`):
+     *  its worktree, the project's `.git`, its `--add-dir` dirs, the `cez` install. A pattern deny
+     *  still wins over these, so a `.env` inside them stays unreadable. */
+    readableRoots?: readonly string[];
   } = {},
 ): ClaudeSandboxSettings | undefined {
   if (isOff(env.CEZ_AGENT_SANDBOX)) return undefined;
@@ -114,12 +147,20 @@ export function claudeSandboxSettings(
   const denyHome = isOn(env.CEZ_AGENT_GH_TOKEN) ? [...DENY_READ_HOME] : [...DENY_READ_HOME, GH_CONFIG];
   const extraDeny = list(env.CEZ_AGENT_SANDBOX_DENY_READ);
   const cezarHome = opts.home && !env.CEZ_HOME ? join(opts.home, '.cezar') : cezarHomeDir(env);
-  const allowRead = CEZAR_HOME_READABLE.map((p) => join(cezarHome, p));
-  // Bash: the whole home, with `allowRead` carving the exceptions back out.
-  const denyRead = [...denyHome.map((p) => join(home, p)), cezarHome, ...extraDeny];
-  // Read tool: its deny rules cannot carve exceptions, so the whole home is denied; only the shell
-  // needs the TMPDIR and binary exceptions.
-  const readToolDeny = denyRead;
+  const allowRead = [
+    ...CEZAR_HOME_READABLE.map((p) => join(cezarHome, p)),
+    ...[...new Set(opts.readableRoots ?? [])].filter(Boolean),
+  ];
+  const secretRoots = [...new Set([home, ...(opts.projectRoots ?? [])])].filter(Boolean);
+  const secretPatterns = secretRoots.flatMap((root) => SECRET_FILE_PATTERNS.flatMap((p) => [join(root, p), join(root, '**', p)]));
+  // Bash: the whole cezar home, with `allowRead` carving the exceptions back out.
+  const denyRead = [...denyHome.map((p) => join(home, p)), cezarHome, ...secretPatterns, ...extraDeny];
+  // Read tool: its deny rules cannot carve exceptions, so the whole cezar home is denied (the run
+  // needs none of it through Read). An extra deny dir that contains one of the run's own roots is
+  // left to the OS sandbox, which enforces it for Bash; denying it here would deny the worktree.
+  const inside = (root: string, path: string) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
+  const readable = opts.readableRoots ?? [];
+  const readToolDeny = denyRead.filter((p) => !(extraDeny.includes(p) && readable.some((r) => inside(p, r))));
   // bubblewrap cannot bind a path that does not exist yet.
   const allowWrite = [
     ...[...ALLOW_WRITE_HOME.map((p) => join(home, p)), ...list(env.CEZ_AGENT_SANDBOX_ALLOW_WRITE)].filter((p) => exists(p)),
@@ -143,4 +184,24 @@ export function claudeSandboxSettings(
     // `//` is Claude's absolute-path spelling; the bare rule covers files such as `~/.netrc`.
     permissions: { deny: readToolDeny.flatMap((p) => [`Read(/${p})`, `Read(/${p}/**)`]) },
   };
+}
+
+/** The main checkout a cezar worktree (`<repo>/.ai/cezar/worktrees/<id>`) belongs to; else `cwd`. */
+export function projectRootOf(cwd: string): string {
+  const marker = `${sep}.ai${sep}cezar${sep}worktrees${sep}`;
+  const at = cwd.indexOf(marker);
+  return at > 0 ? cwd.slice(0, at) : cwd;
+}
+
+/** The outermost package directory above the `cez` entry point (a checkout's workspace root,
+ *  whose node_modules the binary needs), stopping below the home directory. */
+export function cezInstallRoot(bin: string | undefined, home = homedir(), exists: (p: string) => boolean = existsSync): string | undefined {
+  if (!bin) return undefined;
+  let dir = dirname(bin);
+  let root: string | undefined;
+  while (dir !== dirname(dir) && dir !== home) {
+    if (exists(join(dir, 'package.json'))) root = dir;
+    dir = dirname(dir);
+  }
+  return root;
 }

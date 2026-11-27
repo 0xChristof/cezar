@@ -21,7 +21,7 @@ export type { AgentSession, SessionOptions } from './agent-runner.ts';
 import { isSignalTerminationExit, trackChildExit } from './agent-runner.ts';
 import { unwrapJsonErrorEnvelope } from './agent-errors.ts';
 import { buildChildEnv } from './agent-env.ts';
-import { claudeSandboxSettings } from './claude-sandbox.ts';
+import { cezInstallRoot, claudeSandboxSettings, projectRootOf } from './claude-sandbox.ts';
 import { holdForOwnShutdown, ownShutdownExitMessage, ownSignalBehindExit, receivedOwnSignalSince, watchOwnSignals } from './process-signals.ts';
 import { disclaimedCommand } from './disclaim-spawn.ts';
 import { resolveClaudeBin } from './claude-bin.ts';
@@ -131,7 +131,7 @@ export class ClaudeCliRunner implements AgentRunner {
     const mcpConfig = writeClaudeMcpConfig(spec.mcpServers);
     const promptFile = writeClaudeSystemPromptFile(appendClaudeSystemPrompt(spec.systemPrompt));
     // One `--settings` flag only: the OS sandbox rides inside the fence file when there is one.
-    const settingsFile = writeClaudeSettingsFile(spec.claudeSettings && withClaudeSandbox(spec.claudeSettings, process.env, sandboxRunFiles(spec), spec.env?.TMPDIR));
+    const settingsFile = writeClaudeSettingsFile(spec.claudeSettings && withClaudeSandbox(spec.claudeSettings, process.env, sandboxRunOf(spec, process.env)));
     // A fence that could not be written must not run unfenced.
     if (spec.claudeSettings && !settingsFile) {
       mcpConfig?.cleanup();
@@ -516,7 +516,7 @@ export function buildClaudeArgs(
     ? { sandbox: { excludedCommands: spec.sandboxExcludedCommands } }
     : {};
   const fenceFile = settingsPath && spec.claudeSettings;
-  const inline = fenceFile ? { ...hook, ...sandbox } : withClaudeSandbox({ ...hook, ...sandbox }, env, sandboxRunFiles(spec), spec.env?.TMPDIR);
+  const inline = fenceFile ? { ...hook, ...sandbox } : withClaudeSandbox({ ...hook, ...sandbox }, env, sandboxRunOf(spec, env));
   if (Object.keys(inline).length > 0) {
     args.push('--settings', JSON.stringify(inline));
   }
@@ -550,19 +550,38 @@ export function claudeMcpServers(msg: unknown): Extract<AgentEvent, { type: 'mcp
   return { type: 'mcp-servers', servers, tools };
 }
 
-/** The run's own files outside the worktree that its shell writes (#2115 hands claude the dirs). */
-function sandboxRunFiles(spec: Pick<AgentRunSpec, 'env'>): string[] {
-  return [spec.env?.CEZ_HANDOFF_FILE, spec.env?.CEZ_TODOS_FILE].filter((p): p is string => Boolean(p));
+export interface ClaudeSandboxRun {
+  runFiles?: readonly string[];
+  tempDirs?: readonly string[];
+  projectRoots?: readonly string[];
+  readableRoots?: readonly string[];
+}
+
+/** What the sandbox must know about this run: its own files outside the worktree that its shell
+ *  writes (#2115 hands claude the dirs), its TMPDIR, the project and what it must keep reading. */
+export function sandboxRunOf(spec: Pick<AgentRunSpec, 'cwd' | 'env' | 'additionalDirectories' | 'artifactsWriteDir'>, env: NodeJS.ProcessEnv): ClaudeSandboxRun {
+  const project = projectRootOf(spec.cwd);
+  return {
+    runFiles: [spec.env?.CEZ_HANDOFF_FILE, spec.env?.CEZ_TODOS_FILE].filter((p): p is string => Boolean(p)),
+    tempDirs: spec.env?.TMPDIR ? [spec.env.TMPDIR] : [],
+    projectRoots: [project],
+    readableRoots: [
+      spec.cwd,
+      join(project, '.git'),
+      ...(spec.additionalDirectories ?? []),
+      ...(spec.artifactsWriteDir ? [spec.artifactsWriteDir] : []),
+      ...[cezInstallRoot(env.CEZ_BIN)].filter((p): p is string => Boolean(p)),
+    ],
+  };
 }
 
 /** `settings` plus the default OS sandbox (`claude-sandbox.ts`); caller keys win, deny rules add up. */
 export function withClaudeSandbox(
   settings: Record<string, unknown>,
   env: NodeJS.ProcessEnv,
-  runFiles: readonly string[] = [],
-  runTmp?: string,
+  run: ClaudeSandboxRun = {},
 ): Record<string, unknown> {
-  const os = claudeSandboxSettings(env, { runFiles, tempDirs: runTmp ? [runTmp] : [] });
+  const os = claudeSandboxSettings(env, run);
   if (!os) return settings;
   const own = (key: string): Record<string, unknown> => {
     const value = settings[key];
