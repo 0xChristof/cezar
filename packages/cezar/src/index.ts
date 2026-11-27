@@ -10,6 +10,7 @@ import { listServerInstances as webhookServerInstances } from './server-install/
 import { parseArgs } from 'node:util';
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { readdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detectEnvironment } from './core/backend-detect.ts';
@@ -70,9 +71,12 @@ import { runUsageCommand } from './usage-ledger/cli.ts';
 import { runTrackerConnectionsCommand } from './server/tracker/connections-cli.ts';
 import { runTrackerCommand } from './server/tracker/task-cli.ts';
 import { runSecretsCommand } from './workspace/secrets-cli.ts';
-import { launchPageUrl } from './cockpit-address.ts';
+import { launchPageUrl, withCockpitToken } from './cockpit-address.ts';
+import { resolveApiAuth, setCockpitApiToken } from './server/api-auth.ts';
+import { installCockpitAuth } from './runtime/cockpit-client-auth.ts';
 import {
   claimCockpitSlot,
+  cockpitRuntimeRoot,
   inspectCockpitRuntime,
   instanceCockpitSlot,
   newRuntimeId,
@@ -95,6 +99,7 @@ Usage:
   cezar manager <status|tasks|merge|…>  the tools a manager's agent calls on a running cockpit (needs CEZ_MANAGER_ID)
   cezar handoff <log|resume>  update a running task's handoff file (CEZ_HANDOFF_FILE)
   cezar runs list           list a running cockpit's tasks from a shell (CEZ_API_URL=http://127.0.0.1:4321)
+  cezar open [--print]      open the running cockpit logged in (or print its link)
   cezar worktrees <list|reclaim|prune|remove>  task worktrees on disk: sizes, reclaim idle ones
                             (reclaim [--older-than 7d] [--all-inactive] [--dry-run] · remove <runId> ·
                             prune [--archived-older-than 90d] [--dry-run]);
@@ -154,7 +159,16 @@ Skills live in .ai/skills/, .ai/cezar/skills/ and your team skills repo
 (default open-mercato/skills; override via .ai/cezar/config.json);
 workflows in .ai/cezar/workflows/.`;
 
+/** Subcommands that talk to a running cockpit: their fetch carries its credentials (api-auth). */
+const COCKPIT_CLIENT_COMMANDS = new Set(['tracker', 'tracker-connections', 'secrets', 'task', 'automation', 'manager', 'runs', 'worktrees']);
+
 async function main(): Promise<void> {
+  if (COCKPIT_CLIENT_COMMANDS.has(process.argv[2] ?? '')) installCockpitAuth();
+  // `cez open`: the logged-in link to the running cockpit (the token is only readable by you).
+  if (process.argv[2] === 'open') {
+    process.exitCode = await openRunningCockpit(process.argv.includes('--print'));
+    return;
+  }
   if (process.argv[2] === 'tracker') {
     process.exitCode = await runTrackerCommand(process.argv.slice(3));
     return;
@@ -367,7 +381,7 @@ async function serveCommand(
       await handoffProject(runtime, repoRoot, { openBrowser, open: openUrl });
       return;
     }
-    const url = launchPageUrl(runtime.origin);
+    const url = withCockpitToken(launchPageUrl(runtime.origin), runtime.owner.token);
     console.log(`  cockpit already running (pid ${runtime.owner.pid}) — launch root is not registrable`);
     console.log(`  cockpit → ${url}`);
     console.log(handoffMarkerLine(url));
@@ -617,7 +631,10 @@ async function serveCommand(
       // best effort
     }
   }
+  const apiAuth = resolveApiAuth(process.env, port, cockpitLease?.ownership.identity.token);
+  setCockpitApiToken(apiAuth?.token);
   httpServer = startServer({
+    apiAuth,
     repoRoot,
     store,
     manager,
@@ -645,9 +662,11 @@ async function serveCommand(
       .finally(() => manager.lifecycle.start());
   });
   const url = `http://localhost:${port}`;
-  const launchUrl = bootProjectId
+  const pageUrl = bootProjectId
     ? `${url}/p/${encodeURIComponent(bootProjectId)}/`
     : launchPageUrl(url);
+  // The link that logs this browser in (server/api-auth.ts); without auth it is the plain page.
+  const launchUrl = apiAuth ? withCockpitToken(pageUrl, apiAuth.token) : pageUrl;
 
   console.log(`\n  cezar v${version} — ${repoRoot}`);
   console.log(`  ${repo ? `branch ${repo.branch}` : 'not a git repository (tasks run in place, one at a time; repo view is empty)'}`);
@@ -717,6 +736,26 @@ async function serveCommand(
     const healthy = await waitForHealth(`${url}/api/v1/health`, 5_000);
     if (healthy) openUrl(launchUrl);
   }
+}
+
+/** Print (and unless `--print`, open) the logged-in link to a running cockpit on this machine. */
+async function openRunningCockpit(printOnly: boolean): Promise<number> {
+  let slots: string[] = [];
+  try {
+    slots = await readdir(cockpitRuntimeRoot());
+  } catch {
+    // no cockpit has ever published here
+  }
+  for (const slot of slots) {
+    const inspection = await inspectCockpitRuntime(slot).catch(() => undefined);
+    if (inspection?.kind !== 'verified') continue;
+    const url = withCockpitToken(launchPageUrl(inspection.runtime.origin), inspection.runtime.owner.token);
+    console.log(`  cockpit → ${url}`);
+    if (!printOnly) openUrl(url);
+    return 0;
+  }
+  console.error('cez open: no running cockpit found on this machine — start one with `cezar`.');
+  return 1;
 }
 
 async function waitForHealth(healthUrl: string, timeoutMs: number): Promise<boolean> {

@@ -48,12 +48,16 @@ export async function handoffProject(
     const project = parsed.data.project;
     const added = response.status === 200;
     const url = `${runtime.origin.replace(/\/+$/, '')}/p/${encodeURIComponent(project.id)}/`;
+    // What a person (or the desktop shell) opens is the logged-in link (server/api-auth.ts); the
+    // token is the owner lease's, readable only by this user.
+    const login = new URL(url);
+    login.searchParams.set('token', runtime.owner.token);
     (opts.log ?? console.log)(
       `  cockpit already running (pid ${runtime.owner.pid}) — ${added ? 'added' : 'opened'} ${project.name}`,
     );
-    (opts.log ?? console.log)(`  cockpit → ${url}`);
-    (opts.log ?? console.log)(handoffMarkerLine(url));
-    if (opts.openBrowser !== false) opts.open?.(url);
+    (opts.log ?? console.log)(`  cockpit → ${login.toString()}`);
+    (opts.log ?? console.log)(handoffMarkerLine(login.toString()));
+    if (opts.openBrowser !== false) opts.open?.(login.toString());
     return { projectId: project.id, projectName: project.name, added, url };
   } finally {
     clearTimeout(timer);

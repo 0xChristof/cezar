@@ -100,7 +100,12 @@ test('the packaged CLI reuses one cockpit, registers a second CWD, and recovers 
     assert.match(secondary.stdout, /cockpit already running/);
     assert.match(secondary.stdout, new RegExp(`127\\.0\\.0\\.1:${firstPort}/p/[^/]+/`));
 
-    const projectsResponse = await fetch(`${firstOrigin}/api/v1/projects`);
+    // The API needs the cockpit token (server/api-auth.ts); `cez open --print` shows the link.
+    const opened = await execFile(process.execPath, [cliPath, 'open', '--print'], { cwd: root, env, timeout: 30_000 });
+    const token = /[?&]token=([\w-]+)/.exec(opened.stdout)?.[1] ?? '';
+    assert.ok(token, 'cez open --print shows a logged-in link');
+    assert.equal((await fetch(`${firstOrigin}/api/v1/projects`)).status, 401);
+    const projectsResponse = await fetch(`${firstOrigin}/api/v1/projects`, { headers: { 'x-cezar-token': token } });
     assert.equal(projectsResponse.status, 200);
     const projects = await projectsResponse.json() as { projects: Array<{ root: string }> };
     const realRepoB = await realpath(repoB);

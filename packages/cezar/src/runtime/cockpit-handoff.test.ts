@@ -48,10 +48,12 @@ describe('cockpit project handoff', () => {
       added,
       url: 'http://127.0.0.1:4321/p/my-project/',
     });
-    expect(open).toHaveBeenCalledWith(result.url);
+    // What is opened and announced is the logged-in link (server/api-auth.ts).
+    const login = `${result.url}?token=${runtime.owner.token}`;
+    expect(open).toHaveBeenCalledWith(login);
     expect(log).toHaveBeenCalledWith(expect.stringContaining(word));
     // The desktop shell attaches to this exact line (telemetry f3893dd3).
-    expect(log).toHaveBeenLastCalledWith(`cezar-handoff: ${result.url}`);
+    expect(log).toHaveBeenLastCalledWith(`cezar-handoff: ${login}`);
   });
 
   it('does not open a browser under --no-open and fails closed on malformed errors', async () => {

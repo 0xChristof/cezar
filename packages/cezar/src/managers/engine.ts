@@ -1,3 +1,4 @@
+import { cockpitApiToken } from '../server/api-auth.ts';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, writeFileSync } from 'node:fs';
 import { delimiter, join, resolve } from 'node:path';
@@ -2539,6 +2540,8 @@ export class ManagerEngine {
         ...(runner === 'claude' ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {}),
         ...(manager.bashAllow?.length ? { [MANAGER_BASH_ALLOW_ENV]: JSON.stringify(manager.bashAllow) } : {}),
         ...(apiUrl ? { CEZ_API_URL: apiUrl } : {}),
+        // `cez-manager` drives workspace routes a task token does not reach (server/api-auth.ts).
+        ...((token): Record<string, string> => (apiUrl && token ? { CEZ_API_TOKEN: token } : {}))(cockpitApiToken()),
         ...(process.env.CEZ_BIN ? { CEZ_BIN: process.env.CEZ_BIN } : {}),
         ...(shimDir ? { PATH: `${shimDir}${delimiter}${process.env.PATH ?? ''}` } : {}),
         ...(readOnlyWatch ? readOnlyEnv() : {}),

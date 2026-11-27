@@ -431,6 +431,15 @@ import { readUiState, uiStatePath } from '../ui-state.ts';
 import { agentHomePaths, cezarHomeDir, expandTilde, isAbsolutePath } from '../paths.ts';
 import { renameWithRetry } from '../fs-rename.ts';
 import { narrowForRelay, inRelayScope, outsideRelayScope, relayDeviceId } from '../relay/scope.ts';
+import { authenticate, sameSecret, sessionCookie, taskRouteAllowed, type ApiAuth, type ApiCaller } from './api-auth.ts';
+
+/** Shown for a cockpit page opened without the session (server/api-auth.ts). */
+const SIGN_IN_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>cezar — sign in</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:36rem;margin:4rem auto;padding:0 1rem;color:#1f2328}code{background:#f0f0f0;padding:.1rem .3rem;border-radius:4px}@media(prefers-color-scheme:dark){body{background:#0d1117;color:#e6edf3}code{background:#262c36}}</style></head>
+<body><h1>Open cezar through its link</h1><p>This cockpit only answers browsers that were opened through the link cezar printed when it started (<code>cockpit → …?token=…</code>). It keeps the agents cezar runs on this machine from driving the cockpit themselves.</p><p>Run <code>cez open</code> in a terminal to open it again, or <code>cez open --print</code> to see the link.</p></body></html>`;
+
+/** Who an authenticated `/api` request came from, for routes that narrow what a task may do. */
+const apiCallers = new WeakMap<Request, ApiCaller>();
 import { PairingStartError, RelayAccountActionError, RelayAddressError, RelayService, pushBlocked } from '../relay/service.ts';
 import { agentAccountsEnabled, isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './capabilities.ts';
 import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
@@ -509,6 +518,8 @@ export interface ServerDeps {
   runtimeId?: string;
   /** Private token from the `0600` runtime lease; authorizes same-user CLI project delivery. */
   runtimeHandoffToken?: string;
+  /** API authentication (`server/api-auth.ts`). Absent = off: tests and `CEZ_API_AUTH=0`. */
+  apiAuth?: ApiAuth;
   /** Mutable holder for the async npm-registry update check (#368) —
    *  `latest` appears once the registry answers with a newer version. */
   update?: { latest?: string };
@@ -1881,6 +1892,49 @@ export function createAppParts(deps: ServerDeps) {
   // Reject oversized request bodies before they reach any handler (#429). GETs
   // and SSE carry no body, so this only ever gates the mutating routes.
   app.use('*', bodyLimit({ maxSize: GLOBAL_BODY_LIMIT, onError: bodyTooLarge }));
+
+  // ---- API authentication (security hardening, server/api-auth.ts) -----------
+  // Opening any cockpit page with `?token=<cockpit token>` (the link cezar prints) sets the
+  // session cookie and drops the token from the address bar.
+  const apiAuth = deps.apiAuth;
+  if (apiAuth) {
+    app.use('*', async (c, next) => {
+      const page = c.req.method === 'GET' && !c.req.path.startsWith('/api/');
+      const given = page ? c.req.query('token') : undefined;
+      if (given === undefined) {
+        // A page opened without the session would render an empty cockpit whose every call is
+        // refused: say how to get in instead. Assets (scripts, styles, images) stay public.
+        const navigation = page && (c.req.header('accept') ?? '').includes('text/html') && !inRelayScope();
+        if (navigation && !authenticate(apiAuth, { cookie: c.req.header('cookie') })) {
+          return c.html(SIGN_IN_PAGE, 401);
+        }
+        return next();
+      }
+      if (!sameSecret(given, apiAuth.token)) return c.text('Invalid cockpit token: open the link cezar printed at start (`cez open` prints it again).', 403);
+      const url = new URL(c.req.url);
+      url.searchParams.delete('token');
+      const secure = c.req.header('x-forwarded-proto') === 'https' || url.protocol === 'https:';
+      c.header('Set-Cookie', sessionCookie(apiAuth, secure));
+      return c.redirect(`${url.pathname}${url.search}${url.hash}`, 302);
+    });
+    app.use('/api/*', async (c, next) => {
+      if (c.req.path === `${V1_PREFIX}/health` || inRelayScope()) return next();
+      const caller = authenticate(apiAuth, {
+        cookie: c.req.header('cookie'),
+        token: c.req.header('x-cezar-token'),
+        handoffToken: c.req.header('x-cezar-runtime-handoff'),
+        taskToken: c.req.header('x-cezar-task-token'),
+      });
+      if (!caller) {
+        return c.json({ error: 'unauthorized: open the cockpit through the link cezar printed at start (`cez open` prints it again)' }, 401);
+      }
+      if (caller.kind === 'task' && !taskRouteAllowed(c.req.method, c.req.path, caller.grant)) {
+        return c.json({ error: 'forbidden: a task token reaches only its own run, dispatch/report and automation drafts' }, 403);
+      }
+      apiCallers.set(c.req.raw, caller);
+      return next();
+    });
+  }
 
   // ---- request-origin guard (#426) -----------------------------------------
   // This server executes agents with shell access — "start a task" ≈ run code
@@ -4983,6 +5037,8 @@ export function createAppParts(deps: ServerDeps) {
       const issue = await automationInputIssue(parsed.data, kind, parsed.data.enable === true, automationChecks(c.get('project')));
       if (issue) return c.json({ error: issue }, 400);
       const { enable, ...input } = parsed.data;
+      // An agent may draft an automation; only the person turns it on.
+      if (enable && apiCallers.get(c.req.raw)?.kind === 'task') return c.json({ error: 'forbidden: an agent creates automations paused; enable it in the cockpit' }, 403);
       if (input.report && !managerStore.get(input.report.managerId)) return c.json({ error: `manager not found: ${input.report.managerId}` }, 400);
       try {
         const automation = automationStore.create(
@@ -10214,7 +10270,7 @@ export function startServer(deps: ServerDeps, port: number): ServerType & { shut
     }).catch(() => undefined);
   });
   server.once('close', () => { for (const cleanup of appCleanups) cleanup(); unsubscribe(); coordinator.stop(); automationScheduler.stop(); diskGuard?.stop(); });
-  socketHub.attach(server, (req) => verifyWsUpgrade(req, deps.bindHost));
+  socketHub.attach(server, (req) => verifyWsUpgrade(req, deps.bindHost, deps.apiAuth));
   return Object.assign(server, {
     shutdownLifecycle(): Promise<void> {
       if (shutdownPromise) return shutdownPromise;
@@ -10268,11 +10324,17 @@ export function startServer(deps: ServerDeps, port: number): ServerType & { shut
  * provably the cockpit itself: a same-authority Origin, a no-Origin native
  * client, or a dev proxy the browser vouches for via `Sec-Fetch-Site`.
  */
-export function verifyWsUpgrade(req: IncomingMessage, bindHost?: string): WsUpgradeVerdict {
+export function verifyWsUpgrade(req: IncomingMessage, bindHost?: string, apiAuth?: ApiAuth): WsUpgradeVerdict {
   const host = req.headers.host;
   const hostName = hostnameOfHost(host);
   const hosted = !resolveCapabilities(process.env, bindHost).localHandoff;
   if (!hosted && !isLoopbackHostHeader(hostName)) return false;
+  // The bus carries every run's live content: the session (or cockpit token) only, never a task token.
+  if (apiAuth) {
+    const token = req.headers['x-cezar-token'];
+    const caller = authenticate(apiAuth, { cookie: req.headers.cookie, token: typeof token === 'string' ? token : undefined });
+    if (caller?.kind !== 'cockpit') return false;
+  }
   const origin = req.headers.origin;
   if (origin === undefined) return { trusted: true }; // non-browser client — no Origin to spoof
   // Scheme-checked, like the HTTP guard's comparison: `authorityOfOrigin` is

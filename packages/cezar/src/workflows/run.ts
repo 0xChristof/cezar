@@ -1,3 +1,4 @@
+import { COCKPIT_SECRET_ENV, issueTaskToken } from '../server/api-auth.ts';
 import type { StepToolPolicy, SwitchRunAgentInput } from '@open-mercato/cezar-contract';
 import { readOnlyEnv } from '../core/read-only-env.ts';
 import { AgentUsageHolds } from '../workspace/agent-usage-holds.ts';
@@ -2093,6 +2094,8 @@ export class RunManager {
       // which project the run belongs to. Absent (not empty) while the feature is off, so the env
       // is byte-for-byte as before.
       ...(apiUrl ? { CEZ_API_URL: apiUrl } : {}),
+      // Scoped to this run's own routes (server/api-auth.ts `taskRouteAllowed`), never the cockpit token.
+      ...(apiUrl ? { CEZ_TASK_TOKEN: issueTaskToken(runId) } : {}),
       ...(apiUrl && this.projectId ? { CEZ_PROJECT_ID: this.projectId } : {}),
       // The cockpit's OWN entrypoint, so an agent runs `node "$CEZ_BIN" task …` and never an older
       // `cez` that happens to be on its PATH without the command (observed on the first live run).
@@ -2236,7 +2239,7 @@ export class RunManager {
         grant.tokens.add(capability);
         this.trackerCapabilities.set(runId, grant);
         this.store.registerRunSecrets(runId, [capability]);
-        Object.assign(trackerEnv, { CEZ_TRACKER_CAPABILITY: capability, CEZ_API_URL: process.env.CEZ_API_URL!, CEZ_BIN: process.env.CEZ_BIN!, CEZ_TASK_ID: runId, ...(this.projectId ? { CEZ_PROJECT_ID: this.projectId } : {}) });
+        Object.assign(trackerEnv, { CEZ_TRACKER_CAPABILITY: capability, CEZ_API_URL: process.env.CEZ_API_URL!, CEZ_TASK_TOKEN: issueTaskToken(runId), CEZ_BIN: process.env.CEZ_BIN!, CEZ_TASK_ID: runId, ...(this.projectId ? { CEZ_PROJECT_ID: this.projectId } : {}) });
       }
       trackerContext = trackerPrompt({ binding, ...(context && contextFile ? { context, contextFile } : {}), ...(unavailable ? { unavailable } : {}), commands });
     }
@@ -11570,6 +11573,8 @@ export class RunManager {
     // Match case-insensitively as agent env filtering does (and Windows requires).
     for (const name of Object.keys(base)) {
       if (name.toUpperCase() === 'CEZ_TRACKER_CAPABILITY') delete base[name];
+      // Nor does cockpit API authority: a check runs code the agent may have written.
+      if (COCKPIT_SECRET_ENV.includes(name.toUpperCase())) delete base[name];
     }
     for (const name of CHECK_CONTEXT_VARS) {
       // `CEZ_PROJECT_ID` is the one context name that is ALSO a documented CLI input

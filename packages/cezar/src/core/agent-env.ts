@@ -390,6 +390,7 @@ export function buildChildEnv(opts: BuildChildEnvOptions): NodeJS.ProcessEnv {
     for (const [name, value] of Object.entries(source)) {
       // Task authority is per-launch even when full host inheritance is requested.
       if (name.toUpperCase() === 'CEZ_TRACKER_CAPABILITY') continue;
+      if (name.toUpperCase() === 'CEZ_API_TOKEN' || name.toUpperCase() === 'CEZ_TASK_TOKEN') continue;
       if (!overridden.has(name.toUpperCase())) full[name] = value;
     }
     return { ...full, ...extra };
@@ -440,6 +441,8 @@ export function buildChildEnv(opts: BuildChildEnvOptions): NodeJS.ProcessEnv {
     // A nested cockpit must not pass its parent's task authority into unrelated
     // agents. Only an explicit per-launch extraEnv grant may cross this boundary.
     if (key === 'CEZ_TRACKER_CAPABILITY') return false;
+    // Cockpit API authority (server/api-auth.ts) is likewise per-launch only.
+    if (key === 'CEZ_API_TOKEN' || key === 'CEZ_TASK_TOKEN') return false;
     // cezar's own namespace (CEZ_DRY_RUN plumbing, mock hooks, run wiring).
     if (key.startsWith('CEZ_')) return true;
     // Backend auth + the cloud creds an active Bedrock/Vertex toggle needs:
