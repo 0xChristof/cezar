@@ -126,6 +126,9 @@ export interface SudoStepOpts {
   verifyFailure?: (ctx: InstallContext) => Promise<VerifyFailure | undefined>;
 }
 
+/** Minimum typed cockpit password: nginx basic auth has no lockout, so length is the brute-force defence. */
+export const MIN_COCKPIT_PASSWORD = 12;
+
 /**
  * A strong random cockpit password: guaranteed to mix lower/upper letters, a
  * digit and a symbol, drawn from a crypto RNG, with visually-ambiguous glyphs

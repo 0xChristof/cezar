@@ -38,6 +38,10 @@ export const automationFiltersSchema = z
     excludeLabels: stringList,
     changedLabels: stringList,
     reviewers: stringList,
+    /** Let `issue.opened` / `pull_request.opened` fire for any author, not only those with write
+     *  access, when no `authors` filter is set. Off by default: on a public repo a stranger's issue
+     *  text would become an agent prompt. */
+    allowAnyAuthor: z.boolean().optional(),
     lookbackDays: z.number().int().min(1).max(90).default(7),
     maxRecords: z.number().int().min(1).max(100).default(25),
     /** Tracker kind only: the vendor workflow status a matching item must currently be in

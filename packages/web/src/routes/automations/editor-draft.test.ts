@@ -157,6 +157,12 @@ describe('fromDefinition / toBody', () => {
     expect(toBody(fromDefinition(GITHUB_DEF)).task).not.toHaveProperty('checkout')
   })
 
+  it('keeps an allowAnyAuthor opt-in when the automation is saved from the editor', () => {
+    const open = { ...GITHUB_DEF, filters: { lookbackDays: 7, maxRecords: 25, allowAnyAuthor: true } }
+    expect(toBody(fromDefinition(open)).filters).toMatchObject({ allowAnyAuthor: true })
+    expect(toBody(fromDefinition(GITHUB_DEF)).filters).not.toHaveProperty('allowAnyAuthor')
+  })
+
   it('sends only the active kind — a schedule body carries no events or filters', () => {
     const draft = { ...fromDefinition(GITHUB_DEF), kind: 'schedule' as const }
     const body = toBody(draft)

@@ -83,6 +83,10 @@ export const automationFiltersSchema = z.object({
    *  requested reviewer for the two `review_requested` events. Optional: an empty filter means
    *  "any reviewer". */
   reviewers: z.array(z.string()).optional(),
+  /** Let events a stranger can cause on a public repo (opened, closed, review requests, reviews)
+   *  fire for authors/reviewers without write access when no `authors`/`reviewers` filter names
+   *  them. Off by default. */
+  allowAnyAuthor: z.boolean().optional(),
   status: z.string().optional(),
   lookbackDays: z.number(),
   maxRecords: z.number(),

@@ -56,17 +56,36 @@ describe('buildChildEnv — least-privilege child env (#427)', () => {
     expect(codex.ANTHROPIC_API_KEY).toBeUndefined();
   });
 
-  it('keeps GITHUB_TOKEN for the gh handoff and the CEZ_* namespace', () => {
+  it('keeps the CEZ_* namespace and gh plumbing but drops GitHub tokens by default', () => {
     const src = {
       ...HOST,
       GITHUB_TOKEN: 'gho_token',
+      GH_TOKEN: 'gho_token2',
+      GH_ENTERPRISE_TOKEN: 'ghe_token',
+      GH_HOST: 'github.com',
       CEZ_DRY_RUN: '1',
       CEZ_MOCK_ARGS_FILE: '/tmp/args',
     };
     const env = buildChildEnv({ backend: 'claude', source: src });
-    expect(env.GITHUB_TOKEN).toBe('gho_token');
+    expect(env.GITHUB_TOKEN).toBeUndefined();
+    expect(env.GH_TOKEN).toBeUndefined();
+    expect(env.GH_ENTERPRISE_TOKEN).toBeUndefined();
+    expect(env.GH_HOST).toBe('github.com');
     expect(env.CEZ_DRY_RUN).toBe('1');
     expect(env.CEZ_MOCK_ARGS_FILE).toBe('/tmp/args');
+  });
+
+  it('forwards GitHub tokens to copilot, on CEZ_AGENT_GH_TOKEN=1, or by explicit passthrough', () => {
+    const src = { ...HOST, GITHUB_TOKEN: 'gho_token', GH_TOKEN: 'gho_token2' };
+    expect(buildChildEnv({ backend: 'copilot', source: src }).GH_TOKEN).toBe('gho_token2');
+    const optedIn = buildChildEnv({ backend: 'claude', source: { ...src, CEZ_AGENT_GH_TOKEN: '1' } });
+    expect(optedIn.GITHUB_TOKEN).toBe('gho_token');
+    expect(optedIn.GH_TOKEN).toBe('gho_token2');
+    const off = buildChildEnv({ backend: 'codex', source: { ...src, CEZ_AGENT_GH_TOKEN: '0' } });
+    expect(off.GITHUB_TOKEN).toBeUndefined();
+    const named = buildChildEnv({ backend: 'codex', source: { ...src, CEZ_ENV_PASSTHROUGH: 'GH_TOKEN' } });
+    expect(named.GH_TOKEN).toBe('gho_token2');
+    expect(named.GITHUB_TOKEN).toBeUndefined();
   });
 
   it('applies extraEnv (spec.env) last so per-run vars always win', () => {

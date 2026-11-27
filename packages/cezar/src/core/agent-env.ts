@@ -276,16 +276,22 @@ const BACKEND_ALLOW_NAMES: Partial<Record<AgentBackend, ReadonlySet<string>>> = 
   ]),
 };
 
-/** `gh` handoff (draft PRs) works in every backend — the one credential the
- *  project deliberately keeps in the environment (AGENTS.md "No secrets in
- *  state files": GITHUB_TOKEN stays in env, never on disk). */
-const GH_ALLOW_NAMES: ReadonlySet<string> = upperSet([
+/** Non-secret `gh` plumbing, always forwarded. */
+const GH_ALLOW_NAMES: ReadonlySet<string> = upperSet(['GH_HOST', 'GH_CONFIG_DIR']);
+
+/**
+ * GitHub tokens are NOT forwarded by default: the draft-PR handoff runs in the cockpit
+ * (`server/forge/github.ts`), not in the agent, so a prompt-injected agent need not hold a
+ * token it can exfiltrate. Copilot authenticates with them; others opt in via
+ * `CEZ_AGENT_GH_TOKEN=1`.
+ */
+const GH_TOKEN_NAMES: ReadonlySet<string> = upperSet([
   'GITHUB_TOKEN',
   'GH_TOKEN',
-  'GH_HOST',
   'GH_ENTERPRISE_TOKEN',
-  'GH_CONFIG_DIR',
+  'GITHUB_ENTERPRISE_TOKEN',
 ]);
+const GH_TOKEN_TOGGLE = 'CEZ_AGENT_GH_TOKEN';
 
 /**
  * Claude Code can be pointed at Bedrock or Vertex instead of the Anthropic API
@@ -416,6 +422,7 @@ export function buildChildEnv(opts: BuildChildEnvOptions): NodeJS.ProcessEnv {
     for (const n of GEMINI_VERTEX_ALLOW_NAMES) cloudNames.add(n);
   }
   const backendNames = BACKEND_ALLOW_NAMES[opts.backend] ?? new Set<string>();
+  const ghTokens = opts.backend === 'copilot' || isTruthy(readVar(source, GH_TOKEN_TOGGLE));
 
   const out: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(source)) {
@@ -435,11 +442,12 @@ export function buildChildEnv(opts: BuildChildEnvOptions): NodeJS.ProcessEnv {
     if (key === 'CEZ_TRACKER_CAPABILITY') return false;
     // cezar's own namespace (CEZ_DRY_RUN plumbing, mock hooks, run wiring).
     if (key.startsWith('CEZ_')) return true;
-    // Backend auth + gh handoff + the cloud creds an active Bedrock/Vertex
-    // toggle needs: forwarded even though they are secrets — the backend cannot
+    // Backend auth + the cloud creds an active Bedrock/Vertex toggle needs:
+    // forwarded even though they are secrets — the backend cannot
     // authenticate without them. They are still redacted before anything
     // reaches the on-disk NDJSON (see secret-redaction.ts).
     if (GH_ALLOW_NAMES.has(key)) return true;
+    if (GH_TOKEN_NAMES.has(key)) return ghTokens || passthrough.has(key);
     if (matchesPrefix(key, backendPrefixes)) return true;
     if (backendNames.has(key)) return true;
     if (cloudNames.has(key) || matchesPrefix(key, cloudPrefixes)) return true;

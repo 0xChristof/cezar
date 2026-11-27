@@ -21,6 +21,7 @@ export type { AgentSession, SessionOptions } from './agent-runner.ts';
 import { isSignalTerminationExit, trackChildExit } from './agent-runner.ts';
 import { unwrapJsonErrorEnvelope } from './agent-errors.ts';
 import { buildChildEnv } from './agent-env.ts';
+import { cezInstallRoot, claudeSandboxSettings, projectRootOf } from './claude-sandbox.ts';
 import { holdForOwnShutdown, ownShutdownExitMessage, ownSignalBehindExit, receivedOwnSignalSince, watchOwnSignals } from './process-signals.ts';
 import { disclaimedCommand } from './disclaim-spawn.ts';
 import { resolveClaudeBin } from './claude-bin.ts';
@@ -129,7 +130,8 @@ export class ClaudeCliRunner implements AgentRunner {
   ): AgentSession {
     const mcpConfig = writeClaudeMcpConfig(spec.mcpServers);
     const promptFile = writeClaudeSystemPromptFile(appendClaudeSystemPrompt(spec.systemPrompt));
-    const settingsFile = writeClaudeSettingsFile(spec.claudeSettings);
+    // One `--settings` flag only: the OS sandbox rides inside the fence file when there is one.
+    const settingsFile = writeClaudeSettingsFile(spec.claudeSettings && withClaudeSandbox(spec.claudeSettings, process.env, sandboxRunOf(spec, process.env)));
     // A fence that could not be written must not run unfenced.
     if (spec.claudeSettings && !settingsFile) {
       mcpConfig?.cleanup();
@@ -488,7 +490,10 @@ export function buildClaudeArgs(
       args.push('--session-id', spec.sessionId);
     }
   }
-  const allowed = buildAllowedTools(spec.allowedTools ?? [], spec.bashAllowlist);
+  const built = buildAllowedTools(spec.allowedTools ?? [], spec.bashAllowlist);
+  // The OS sandbox fences Bash only: a bare Write/Edit grant would still write anywhere (a shell rc
+  // file, the main checkout's .ai/cezar/workflows that cezar runs unsandboxed). Scope it to the run.
+  const allowed = claudeSandboxSettings(env) ? scopeFileWrites(built, spec) : built;
   const artifactsRule = claudeArtifactsWriteRule(spec);
   if (artifactsRule) allowed.push(artifactsRule);
   // Private MCP servers (spec 2026-10-07-private-project-mcp): `--mcp-config` ADDS to the repo's
@@ -513,8 +518,10 @@ export function buildClaudeArgs(
   const sandbox = spec.sandboxExcludedCommands?.length && bashAllowed
     ? { sandbox: { excludedCommands: spec.sandboxExcludedCommands } }
     : {};
-  if (Object.keys(hook).length > 0 || Object.keys(sandbox).length > 0) {
-    args.push('--settings', JSON.stringify({ ...hook, ...sandbox }));
+  const fenceFile = settingsPath && spec.claudeSettings;
+  const inline = fenceFile ? { ...hook, ...sandbox } : withClaudeSandbox({ ...hook, ...sandbox }, env, sandboxRunOf(spec, env));
+  if (Object.keys(inline).length > 0) {
+    args.push('--settings', JSON.stringify(inline));
   }
   // Settings allow rules widen `--allowedTools`; only a deny rule outranks them.
   const disallowed = [...(spec.enforceReadOnly ? CLAUDE_WRITE_TOOLS : []), ...claudeReadOnlyPathRules(spec.readOnlyPaths)];
@@ -544,6 +551,64 @@ export function claudeMcpServers(msg: unknown): Extract<AgentEvent, { type: 'mcp
   });
   const tools = (Array.isArray(raw.tools) ? raw.tools : []).filter((tool: unknown): tool is string => typeof tool === 'string');
   return { type: 'mcp-servers', servers, tools };
+}
+
+export interface ClaudeSandboxRun {
+  runFiles?: readonly string[];
+  tempDirs?: readonly string[];
+  projectRoots?: readonly string[];
+  readableRoots?: readonly string[];
+  binRoots?: readonly string[];
+  /** Whether the run may use Bash. Without it only the permission rules apply: no OS sandbox to
+   *  require, so a host without one (Linux missing bubblewrap) still runs a Bash-free step. */
+  bash?: boolean;
+}
+
+/** What the sandbox must know about this run: its own files outside the worktree that its shell
+ *  writes (#2115 hands claude the dirs), its TMPDIR, the project and what it must keep reading. */
+export function sandboxRunOf(
+  spec: Pick<AgentRunSpec, 'cwd' | 'env' | 'additionalDirectories' | 'artifactsWriteDir' | 'allowedTools' | 'bashAllowlist'>,
+  env: NodeJS.ProcessEnv,
+): ClaudeSandboxRun {
+  const project = projectRootOf(spec.cwd);
+  return {
+    bash: buildAllowedTools(spec.allowedTools ?? [], spec.bashAllowlist).some((rule) => rule === 'Bash' || rule.startsWith('Bash(')),
+    runFiles: [spec.env?.CEZ_HANDOFF_FILE, spec.env?.CEZ_TODOS_FILE].filter((p): p is string => Boolean(p)),
+    tempDirs: spec.env?.TMPDIR ? [spec.env.TMPDIR] : [],
+    projectRoots: [project],
+    readableRoots: [
+      spec.cwd,
+      join(project, '.git'),
+      ...(spec.additionalDirectories ?? []),
+      ...(spec.artifactsWriteDir ? [spec.artifactsWriteDir] : []),
+    ],
+    binRoots: [cezInstallRoot(env.CEZ_BIN)].filter((p): p is string => Boolean(p)),
+  };
+}
+
+/** `settings` plus the default OS sandbox (`claude-sandbox.ts`); caller keys win, deny rules add up. */
+export function withClaudeSandbox(
+  settings: Record<string, unknown>,
+  env: NodeJS.ProcessEnv,
+  run: ClaudeSandboxRun = {},
+): Record<string, unknown> {
+  const os = claudeSandboxSettings(env, run);
+  if (!os) return settings;
+  const own = (key: string): Record<string, unknown> => {
+    const value = settings[key];
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  };
+  const permissions = own('permissions');
+  const deny = Array.isArray(permissions.deny) ? permissions.deny : [];
+  const merged = { ...permissions, deny: [...deny, ...os.permissions.deny] };
+  // Without the sandbox, Bash must be impossible, not merely ungranted: a deny rule outranks
+  // bypassPermissions and any settings `allow` (a repo's own .claude/settings.json included).
+  if (run.bash === false) return { ...settings, permissions: { ...merged, deny: [...merged.deny, 'Bash'] } };
+  return {
+    ...settings,
+    sandbox: { ...os.sandbox, ...own('sandbox') },
+    permissions: merged,
+  };
 }
 
 /** `AgentRunSpec.claudeSettings` in a `0600` temp file for `--settings`: a hook command stays out of `ps`. */
@@ -620,6 +685,31 @@ export function claudeArtifactsWriteRule(spec: Pick<AgentRunSpec, 'artifactsWrit
   // Absolute POSIX paths only, and nothing a rule would read as a glob or end its specifier with.
   if (!dir.startsWith('/') || /[*?[\](),\n]/.test(dir)) return undefined;
   return `Edit(/${dir.replace(/\/+$/, '')}/**)`;
+}
+
+const FILE_WRITE_TOOLS: ReadonlySet<string> = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+
+/**
+ * Replace bare file-writing grants with `Edit(//<root>/**)` rules (Claude applies Edit rules to
+ * every file-writing tool) over what the run owns: its worktree, `--add-dir` dirs, artifacts dir,
+ * TMPDIR and its handoff / todos files. Under `dontAsk` every other path is denied. A path a rule
+ * cannot express is dropped, never widened.
+ */
+export function scopeFileWrites(
+  allowed: readonly string[],
+  spec: Pick<AgentRunSpec, 'cwd' | 'env' | 'additionalDirectories' | 'artifactsWriteDir'>,
+): string[] {
+  if (!allowed.some((t) => FILE_WRITE_TOOLS.has(t))) return [...allowed];
+  const expressible = (p: string | undefined): p is string => !!p && p.startsWith('/') && !/[*?[\](),\n]/.test(p);
+  const dirs = [spec.cwd, ...(spec.additionalDirectories ?? []), spec.artifactsWriteDir, spec.env?.TMPDIR].filter(expressible);
+  const files = [spec.env?.CEZ_HANDOFF_FILE, spec.env?.CEZ_TODOS_FILE].filter(expressible);
+  const rules = [
+    ...new Set([
+      ...dirs.map((d) => `Edit(/${d.replace(/\/+$/, '')}/**)`),
+      ...files.map((f) => `Edit(/${f})`),
+    ]),
+  ];
+  return [...allowed.filter((t) => !FILE_WRITE_TOOLS.has(t)), ...rules];
 }
 
 /** `Edit(//<path>)` deny rules — Claude applies Edit rules to every file-writing tool. A path a

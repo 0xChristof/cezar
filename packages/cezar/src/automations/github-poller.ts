@@ -25,6 +25,7 @@ const githubItemSchema = z.object({
   updated_at: z.string().datetime().optional(),
   closed_at: z.string().datetime().nullable().optional(),
   user: z.object({ login: z.string() }),
+  author_association: z.string().optional(),
   assignees: z.array(z.object({ login: z.string() })).default([]),
   labels: z.array(z.object({ name: z.string() })).default([]),
   repository_url: z.string().url(),
@@ -48,6 +49,7 @@ const reviewedTimelineEventSchema = z.object({
   event: z.literal('reviewed'),
   submitted_at: z.string().datetime(),
   user: z.object({ login: z.string() }),
+  author_association: z.string().optional(),
 });
 const reviewRequestedTimelineEventSchema = z.object({
   id: z.number().int().positive().optional(),
@@ -74,10 +76,14 @@ export interface GithubCandidate {
   title: string;
   url: string;
   author: string;
+  /** GitHub's `author_association` of the item's author (`OWNER`, `MEMBER`, `NONE`, …). */
+  authorAssociation?: string;
   assignees: string[];
   labels: string[];
   changedLabel?: string;
   reviewer?: string;
+  /** `author_association` of the reviewer on a `pull_request.reviewed` row. */
+  reviewerAssociation?: string;
 }
 
 export interface GithubPollResult {
@@ -480,6 +486,7 @@ function normalizeOpened(owner: string, repo: string, item: z.infer<typeof githu
     title: sanitize(item.title, 500),
     url: item.html_url,
     author: item.user.login,
+    ...(item.author_association ? { authorAssociation: item.author_association } : {}),
     assignees: item.assignees.map((assignee) => assignee.login),
     labels: item.labels.map((label) => label.name),
   };
@@ -573,6 +580,7 @@ export function reconstructReviewEvents(
         timestamp: entry.submitted_at,
         tieBreaker: stable,
         reviewer: entry.user.login,
+        ...(entry.author_association ? { reviewerAssociation: entry.author_association } : {}),
       });
       hasReviewed.add(entry.user.login.toLowerCase());
       continue;
@@ -601,10 +609,42 @@ export function reconstructReviewEvents(
   return rows.sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.tieBreaker.localeCompare(b.tieBreaker));
 }
 
+/** Authors with write access to the repo; anyone else may be a stranger on a public repo. */
+const TRUSTED_AUTHOR_ASSOCIATIONS: ReadonlySet<string> = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+
+/**
+ * Events only a deliberate act of someone with write access causes: labelling, merging. Review
+ * requests are NOT here: CODEOWNERS requests reviews automatically when a stranger opens a PR.
+ */
+const WRITE_ACCESS_EVENTS: ReadonlySet<AutomationEvent> = new Set([
+  'issue.labeled',
+  'issue.unlabeled',
+  'pull_request.merged',
+]);
+
+const trusted = (association: string | undefined): boolean =>
+  TRUSTED_AUTHOR_ASSOCIATIONS.has((association ?? '').toUpperCase());
+
+/**
+ * On a public repo anyone can open an issue or PR, close their own PR or submit a review, and the
+ * item's text becomes the agent's prompt. Deny by default: such events fire only for a trusted
+ * actor (author, or reviewer for `pull_request.reviewed`) unless the automation names who may
+ * fire it (`authors` / `reviewers`) or opts in with `filters.allowAnyAuthor`. A missing
+ * association fails closed.
+ */
+export function isTrustedEvent(candidate: GithubCandidate, filters: GithubAutomationDefinition['filters']): boolean {
+  if (WRITE_ACCESS_EVENTS.has(candidate.event) || filters.allowAnyAuthor === true) return true;
+  if (candidate.event === 'pull_request.reviewed') {
+    return Boolean(filters.reviewers?.length) || trusted(candidate.reviewerAssociation);
+  }
+  return Boolean(filters.authors?.length) || trusted(candidate.authorAssociation);
+}
+
 export function matchesFilters(candidate: GithubCandidate, definition: GithubAutomationDefinition): boolean {
   const lower = (values: readonly string[]) => new Set(values.map((value) => value.toLowerCase()));
   const labels = lower(candidate.labels);
   const filters = definition.filters;
+  if (!isTrustedEvent(candidate, filters)) return false;
   if (filters.authors?.length && !lower(filters.authors).has(candidate.author.toLowerCase())) return false;
   if (filters.assignees?.length && !candidate.assignees.some((value) => lower(filters.assignees!).has(value.toLowerCase()))) return false;
   if (filters.allLabels?.some((value) => !labels.has(value.toLowerCase()))) return false;

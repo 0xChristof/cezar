@@ -80,6 +80,8 @@ export interface EditorDraft {
    *  never silently turns it back into a base-branch one. */
   checkout?: 'base' | 'pr-head'
   allowForkHeads?: boolean
+  /** `filters.allowAnyAuthor`: no control yet, carried so a save never drops the opt-in. */
+  allowAnyAuthor?: boolean
 }
 
 /** The nine events the poller reconstructs (Q6: nothing else is offered). */
@@ -212,6 +214,7 @@ export function fromDefinition(definition: AutomationDefinition): EditorDraft {
     enabled: definition.enabled,
     ...(task.checkout !== undefined ? { checkout: task.checkout } : {}),
     ...(task.allowForkHeads !== undefined ? { allowForkHeads: task.allowForkHeads } : {}),
+    ...(filters?.allowAnyAuthor !== undefined ? { allowAnyAuthor: filters.allowAnyAuthor } : {}),
   }
 }
 
@@ -340,6 +343,7 @@ export function toBody(draft: EditorDraft): AutomationBody {
       ...list(f.excludeLabels, 'excludeLabels'),
       ...list(f.changedLabels, 'changedLabels'),
       ...list(f.reviewers, 'reviewers'),
+      ...(draft.allowAnyAuthor !== undefined ? { allowAnyAuthor: draft.allowAnyAuthor } : {}),
       lookbackDays: clamp(f.lookbackDays, 1, 90),
       maxRecords: clamp(f.maxRecords, 1, 100),
     },

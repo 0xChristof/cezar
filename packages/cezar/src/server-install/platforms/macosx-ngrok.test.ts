@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cezarLaunchdPlist, launchdPlist, macosxNgrok, macosxNgrokIdentityStep } from './macosx-ngrok.ts';
+import { cezarLaunchdPlist, launchdPlist, macosxNgrok, macosxNgrokIdentityStep, ngrokTunnelConfig } from './macosx-ngrok.ts';
 import { availablePlatformIds, getStrategy } from '../strategies.ts';
 import { runInstall, runUninstall } from '../engine.ts';
 import { loadServerState } from '../state.ts';
@@ -46,13 +46,22 @@ describe('macosx-ngrok', () => {
     expect(availablePlatformIds()).toEqual(['ubuntu-vps', 'macosx-ngrok']);
   });
 
-  it('launchdPlist embeds the port, basic-auth and reserved domain', () => {
-    const p = launchdPlist(4321, 'ops:hunter2', 'cezar.ngrok.app');
-    expect(p).toContain('<string>http</string>');
-    expect(p).toContain('<string>4321</string>');
-    expect(p).toContain('<string>ops:hunter2</string>');
-    expect(p).toContain('<string>cezar.ngrok.app</string>');
+  it('launchdPlist starts the named tunnel from config files and keeps credentials out of argv', () => {
+    const p = launchdPlist('/home/u/tunnel.yml', '/home/u/ngrok.yml', '/opt/homebrew/bin/ngrok');
+    expect(p).toContain('<string>start</string>');
+    expect(p).toContain('<string>cezar</string>');
+    expect(p).toContain('<string>/home/u/ngrok.yml</string>');
+    expect(p).toContain('<string>/home/u/tunnel.yml</string>');
+    expect(p).not.toContain('--basic-auth');
     expect(p).toContain('<key>KeepAlive</key>');
+  });
+
+  it('ngrokTunnelConfig carries the port, basic-auth and reserved domain, quoted', () => {
+    const c = ngrokTunnelConfig(4321, 'ops:p"w:#1', 'cezar.ngrok.app');
+    expect(c).toContain('addr: 4321');
+    expect(c).toContain('domain: "cezar.ngrok.app"');
+    expect(c).toContain('- "ops:p\\"w:#1"');
+    expect(ngrokTunnelConfig(4321, 'ops:x')).not.toContain('domain:');
   });
 
   it('cezar launchd plist has one PATH key and carries instance identity', () => {
@@ -158,7 +167,7 @@ describe('macosx-ngrok review fixes (PR #423)', () => {
       state: { schema: 1, installed: false, primaryPort: 4321, steps: {} },
       ui: {
         ...createAutoUi(),
-        password: async (o: { message: string }) => (o.message.includes('authtoken') ? 'SECRET-TOKEN' : 'longenough'),
+        password: async (o: { message: string }) => (o.message.includes('authtoken') ? 'SECRET-TOKEN' : 'longenough-pass'),
         text: async (o: { message: string }) => (o.message.includes('domain') ? '' : 'ops'),
       },
       runner,
@@ -194,7 +203,7 @@ describe('macosx-ngrok review fixes (PR #423)', () => {
     expect(tokenCall?.env?.NGROK_AUTHTOKEN).toBe('SECRET-TOKEN');
   });
 
-  it('writes the credential-bearing plist 0600', async () => {
+  it('keeps the credentials in a 0600 tunnel config, out of the plist argv', async () => {
     const runner: Runner = {
       capture: async (_p, args) => {
         if (args[0] === 'print' || args.join(' ').includes('command -v')) return { code: 0, stdout: '/usr/local/bin/ngrok', stderr: '' };
@@ -209,9 +218,11 @@ describe('macosx-ngrok review fixes (PR #423)', () => {
     try {
       await ngrokStepOf().run(ctxFor(runner));
       const p = join(home, 'Library', 'LaunchAgents', 'ai.cezar.ngrok.plist');
-      const mode = statSync(p).mode & 0o777;
-      expect(mode).toBe(0o600);
-      expect(readFileSync(p, 'utf8')).toContain('ops:longenough'); // creds live here → hence 0600
+      expect(statSync(p).mode & 0o777).toBe(0o600);
+      expect(readFileSync(p, 'utf8')).not.toContain('longenough-pass'); // argv is visible to every local user via ps
+      const tunnel = join(home, 'Library', 'Application Support', 'cezar', 'ngrok-tunnel.yml');
+      expect(statSync(tunnel).mode & 0o777).toBe(0o600);
+      expect(readFileSync(tunnel, 'utf8')).toContain('"ops:longenough-pass"');
     } finally {
       if (oldHome === undefined) delete process.env.HOME;
       else process.env.HOME = oldHome;
@@ -269,7 +280,7 @@ describe('macosx-ngrok review fixes (PR #423)', () => {
     const ctx = ctxFor(runner, {
       ui: {
         ...createAutoUi(),
-        password: async () => 'longenough',
+        password: async () => 'longenough-pass',
         text: async (o: { message: string; validate?: (v: string) => string | undefined }) => {
           if (o.message.includes('domain')) {
             domainValidate = o.validate;

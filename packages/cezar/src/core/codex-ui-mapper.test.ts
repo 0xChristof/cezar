@@ -897,7 +897,7 @@ describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)',
     ]);
   }, 30_000);
 
-  it('keeps autonomous full-access permissions when resuming a thread', async () => {
+  it('keeps the default autonomous sandbox when resuming a thread', async () => {
     const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
     const session = runner.startSession(
       { userPrompt: 'continue', cwd: process.cwd(), resume: true, sessionId: 'th_mock_1' },
