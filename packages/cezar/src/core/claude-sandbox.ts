@@ -38,6 +38,11 @@ const GH_CONFIG = '.config/gh';
  * tokens, so all of it is unreadable except what a run needs: its TMPDIR and the `cez` binary.
  */
 const CEZAR_HOME_READABLE = ['tmp', 'bin', 'versions'] as const;
+/** cezar's own credential stores, denied by name in case they appear after a run's launch. */
+const CEZAR_HOME_SECRETS = [
+  'secrets', 'tracker-connections', 'runtime', 'relay', 'agent-homes', 'agent-accounts.json',
+  'config.json', 'instances', 'server-instances', 'server.json', 'managers.json', 'uploads', 'telemetry',
+] as const;
 
 /**
  * Secret-bearing file names, denied by pattern under the home and project roots: the sandbox
@@ -66,17 +71,24 @@ export const SECRET_FILE_PATTERNS = [
   'id_ed25519',
 ] as const;
 
-/** Package-manager caches a build legitimately writes; only those that exist are granted. */
+/**
+ * Package-manager caches a build legitimately writes; only those that exist are granted. Cache
+ * subdirectories only: never a dir on PATH (`~/Library/pnpm`, `~/.yarn/bin`) or one whose content
+ * the host later executes (`~/.npm/_npx`), where a planted shim would run unsandboxed.
+ */
 const ALLOW_WRITE_HOME = [
-  '.npm',
-  '.cache',
+  '.npm/_cacache',
+  '.npm/_logs',
   '.pnpm-store',
-  '.yarn',
+  'Library/pnpm/store',
+  '.yarn/berry/cache',
+  'Library/Caches/Yarn',
+  '.cache/pip',
+  'Library/Caches/pip',
+  '.cache/uv',
   '.bun/install/cache',
   '.cargo/registry',
   'go/pkg/mod',
-  'Library/Caches',
-  'Library/pnpm',
 ] as const;
 
 /** Package registries, GitHub source downloads and the loopback cockpit (`CEZ_API_URL`). */
@@ -110,9 +122,10 @@ function isOff(value: string | undefined): boolean {
   return v === '0' || v === 'false' || v === 'off' || v === 'no';
 }
 
+/** Same reading as `agent-env.ts` `isTruthy`, so one toggle never means two things. */
 function isOn(value: string | undefined): boolean {
   const v = value?.trim().toLowerCase();
-  return v !== undefined && v !== '' && !isOff(v);
+  return v !== undefined && v !== '' && v !== '0' && v !== 'false';
 }
 
 function list(value: string | undefined): string[] {
@@ -155,8 +168,11 @@ export function claudeSandboxSettings(
   const credentialDirs = [home, cezarHome, ...denyHome.map((p) => join(home, p))];
   // A carve-out is only for a run root inside an extra deny dir, and never one that holds home,
   // cezar's home or a credential store: a broad allow must not reopen what a narrow deny closed.
+  // cezar's home is carved like an extra deny dir: a review's PR checkout and a manager's workdir
+  // live there (`~/.cezar/pr-checkouts`, `~/.cezar/managers/<id>/workdir`).
+  const carvable = [...extraDeny, cezarHome];
   const carve = (roots: readonly string[] | undefined) => [...new Set(roots ?? [])].filter((r) =>
-    r && extraDeny.some((d) => inside(d, r)) && !credentialDirs.some((c) => inside(r, c)));
+    r && carvable.some((d) => inside(d, r)) && !credentialDirs.some((c) => inside(r, c)));
   const runRoots = carve(opts.readableRoots);
   const allowRead = [...CEZAR_HOME_READABLE.map((p) => join(cezarHome, p)), ...runRoots, ...carve(opts.binRoots)];
   const secretRoots = [...new Set([home, ...(opts.projectRoots ?? [])])].filter(Boolean);
@@ -178,9 +194,15 @@ export function claudeSandboxSettings(
     });
   };
   const readToolDeny = denyRead.flatMap((p) => {
-    if (!extraDeny.includes(p)) return [p];
+    if (!carvable.includes(p)) return [p];
     const within = runRoots.filter((r) => inside(p, r));
-    return within.length > 0 ? aroundRoots(p, within) : [p];
+    if (within.length === 0) return [p];
+    // The listing is a launch-time snapshot: name cezar's known secret stores too, so one created
+    // later is still denied.
+    const known = p === cezarHome
+      ? CEZAR_HOME_SECRETS.map((n) => join(p, n)).filter((k) => !within.some((r) => inside(k, r)))
+      : [];
+    return [...new Set([...aroundRoots(p, within), ...known])];
   });
   // bubblewrap cannot bind a path that does not exist yet.
   const allowWrite = [

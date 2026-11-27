@@ -783,11 +783,11 @@ describe('default OS sandbox for Claude Bash', () => {
   it('extends domains, deny-read and writable paths from env; grants only existing caches', () => {
     const settings = claudeSandboxSettings(
       { CEZ_AGENT_SANDBOX_DOMAINS: 'api.example.com, *.corp.test', CEZ_AGENT_SANDBOX_DENY_READ: '/srv/secrets', CEZ_AGENT_SANDBOX_ALLOW_WRITE: '/data/out' },
-      { home, platform: 'darwin', exists: (p) => p === `${home}/.npm` || p === '/data/out' },
+      { home, platform: 'darwin', exists: (p) => p === `${home}/.npm/_cacache` || p === '/data/out' },
     )!;
     expect(settings.sandbox.network.allowedDomains).toEqual(expect.arrayContaining(['api.example.com', '*.corp.test']));
     expect(settings.sandbox.filesystem.denyRead).toContain('/srv/secrets');
-    expect(settings.sandbox.filesystem.allowWrite).toEqual([`${home}/.npm`, '/data/out']);
+    expect(settings.sandbox.filesystem.allowWrite).toEqual([`${home}/.npm/_cacache`, '/data/out']);
   });
 
   it('CEZ_AGENT_GH_TOKEN=1 also lifts the ~/.config/gh read denial', () => {
@@ -946,5 +946,46 @@ describe('file-writing tools are scoped to the run under the sandbox', () => {
     expect(args({ HOME: '/home/dev' })).toContain('Edit(//repo/.ai/cezar/worktrees/r1/**)');
     expect(args({ HOME: '/home/dev' }).split(',')).not.toContain('Write');
     expect(args({ CEZ_AGENT_SANDBOX: '0' }).split(',')).toContain('Write');
+  });
+});
+
+describe('runs that live under cezar\'s home stay usable (review checkouts, manager workdirs)', () => {
+  const home = '/home/dev';
+  it('carves a PR checkout out of cezar home for Bash and the Read tool, keeping secrets denied', () => {
+    const tree: Record<string, string[]> = {
+      '/home/dev/.cezar': ['pr-checkouts', 'secrets', 'tmp', 'config.json'],
+      '/home/dev/.cezar/pr-checkouts': ['r1', 'r2'],
+    };
+    const settings = claudeSandboxSettings({}, {
+      home, platform: 'linux', exists: () => true,
+      readableRoots: ['/repo/wt', '/home/dev/.cezar/pr-checkouts/r1'],
+      listDir: (p) => tree[p] ?? [],
+    })!;
+    expect(settings.sandbox.filesystem.allowRead).toContain('/home/dev/.cezar/pr-checkouts/r1');
+    expect(settings.sandbox.filesystem.allowRead).not.toContain('/repo/wt'); // not inside a denied dir
+    const deny = settings.permissions.deny;
+    expect(deny).not.toContain('Read(//home/dev/.cezar/**)');
+    expect(deny).not.toContain('Read(//home/dev/.cezar/pr-checkouts/r1/**)');
+    for (const denied of ['pr-checkouts/r2', 'secrets', 'tmp', 'config.json', 'relay', 'agent-homes']) {
+      expect(deny).toContain(`Read(//home/dev/.cezar/${denied}/**)`);
+    }
+  });
+
+  it('never caches PATH dirs or executables as writable', () => {
+    const settings = claudeSandboxSettings({}, { home, platform: 'linux', exists: () => true })!;
+    const writes = settings.sandbox.filesystem.allowWrite;
+    for (const risky of ['/home/dev/Library/pnpm', '/home/dev/.yarn', '/home/dev/.npm', '/home/dev/.cache', '/home/dev/Library/Caches']) {
+      expect(writes).not.toContain(risky);
+    }
+    expect(writes).toContain('/home/dev/.npm/_cacache');
+  });
+
+  it('reads CEZ_AGENT_GH_TOKEN exactly like agent-env does', () => {
+    const denied = (v: string) => claudeSandboxSettings({ CEZ_AGENT_GH_TOKEN: v }, { home, platform: 'linux', exists: () => true })!
+      .sandbox.filesystem.denyRead.includes('/home/dev/.config/gh');
+    expect(denied('1')).toBe(false);
+    expect(denied('no')).toBe(false); // truthy in agent-env too: tokens forwarded, so gh config readable
+    expect(denied('0')).toBe(true);
+    expect(denied('false')).toBe(true);
   });
 });
