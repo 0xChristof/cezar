@@ -30,6 +30,9 @@ const DENY_READ_HOME = [
   '.config/gcloud',
   '.config/op',
   'Library/Keychains',
+  // The hosted (ngrok) cockpit's API token, tunnel config and launchd agents that carry it.
+  'Library/Application Support/cezar',
+  'Library/LaunchAgents',
 ] as const;
 const GH_CONFIG = '.config/gh';
 

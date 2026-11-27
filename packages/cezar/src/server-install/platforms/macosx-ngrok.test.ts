@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cezarLaunchdPlist, launchdPlist, macosxNgrok, macosxNgrokIdentityStep, ngrokTunnelConfig } from './macosx-ngrok.ts';
+import { cezarLaunchdPlist, hostedApiToken, launchdPlist, macosxNgrok, macosxNgrokIdentityStep, ngrokTunnelConfig } from './macosx-ngrok.ts';
 import { availablePlatformIds, getStrategy } from '../strategies.ts';
 import { runInstall, runUninstall } from '../engine.ts';
 import { loadServerState } from '../state.ts';
@@ -62,6 +62,25 @@ describe('macosx-ngrok', () => {
     expect(c).toContain('domain: "cezar.ngrok.app"');
     expect(c).toContain('- "ops:p\\"w:#1"');
     expect(ngrokTunnelConfig(4321, 'ops:x')).not.toContain('domain:');
+  });
+
+  it('signs in what passes the tunnel: the tunnel adds the cockpit token the agent plist carries', () => {
+    const c = ngrokTunnelConfig(4321, 'ops:x', undefined, 'ab12');
+    expect(c).toContain('request_header:');
+    expect(c).toContain('- "x-cezar-token: ab12"');
+    expect(ngrokTunnelConfig(4321, 'ops:x')).not.toContain('request_header');
+    const plist = cezarLaunchdPlist('/repo', 4321, ['/usr/bin/node', '/app/dist/index.js'], undefined, 'ab12');
+    expect(plist).toContain('<key>CEZ_API_TOKEN</key>');
+    expect(plist).toContain('<string>ab12</string>');
+    expect(cezarLaunchdPlist('/repo', 4321, ['/usr/bin/node', '/app/dist/index.js'])).not.toContain('CEZ_API_TOKEN');
+  });
+
+  it('creates the hosted token once, 0600, and reuses it', () => {
+    const file = join(home, 'tok', 'api-token');
+    const first = hostedApiToken(file);
+    expect(first).toMatch(/^[0-9a-f]{64}$/);
+    expect(hostedApiToken(file)).toBe(first);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
   });
 
   it('cezar launchd plist has one PATH key and carries instance identity', () => {
