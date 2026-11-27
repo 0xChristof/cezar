@@ -74,6 +74,7 @@ import { runSecretsCommand } from './workspace/secrets-cli.ts';
 import { launchPageUrl, withCockpitToken } from './cockpit-address.ts';
 import { resolveApiAuth, setCockpitApiToken } from './server/api-auth.ts';
 import { installCockpitAuth } from './runtime/cockpit-client-auth.ts';
+import { applyOfflineDefaults } from './offline.ts';
 import {
   claimCockpitSlot,
   cockpitRuntimeRoot,
@@ -163,6 +164,7 @@ workflows in .ai/cezar/workflows/.`;
 const COCKPIT_CLIENT_COMMANDS = new Set(['tracker', 'tracker-connections', 'secrets', 'task', 'automation', 'manager', 'runs', 'worktrees']);
 
 async function main(): Promise<void> {
+  applyOfflineDefaults();
   if (COCKPIT_CLIENT_COMMANDS.has(process.argv[2] ?? '')) installCockpitAuth();
   // `cez open`: the logged-in link to the running cockpit (the token is only readable by you).
   if (process.argv[2] === 'open') {

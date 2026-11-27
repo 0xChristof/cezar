@@ -5,6 +5,7 @@
  * exactly like the boot-time check it replaced (#368).
  */
 
+import { isOffline } from '../offline.ts';
 import { z } from 'zod';
 
 import { classifyVersion, compareVersions, type VersionChannel } from './semver.ts';
@@ -41,6 +42,8 @@ export function registryPath(pkgName: string): string {
 }
 
 export async function fetchPackageDocument(pkgName: string, fetchImpl: typeof fetch = fetch): Promise<PackageDocument | null> {
+  // Offline (offline.ts): no update lookups; an injected fetch (tests) still runs.
+  if (isOffline() && fetchImpl === fetch) return null;
   try {
     const res = await fetchImpl(`${REGISTRY}/${registryPath(pkgName)}`, {
       signal: AbortSignal.timeout(TIMEOUT_MS),

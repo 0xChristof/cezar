@@ -1,3 +1,4 @@
+import { isOffline } from './offline.ts';
 import { execFile } from 'node:child_process';
 import { constants, existsSync, readFileSync } from 'node:fs';
 import { lstat, mkdir, mkdtemp, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
@@ -176,6 +177,8 @@ function warnUnsafeRemoteOnce(repo: string): void {
 
 /** Clone the skills repo bare (no checkout) into the global cache, once. */
 export async function ensureBareClone(repo: string): Promise<{ bareDir: string; created: boolean }> {
+  // Offline (offline.ts): a remote skills repo is never cloned; callers degrade as with no network.
+  if (isOffline() && !isLocalRepo(repo)) throw new Error('offline: remote skills repos are not fetched (CEZ_OFFLINE=0 to allow)');
   // Validate before anything else, cache hit or not: "this source is refusable"
   // should never depend on whether a clone happens to exist already.
   const remote = safeRemoteFor(repo);
@@ -198,6 +201,7 @@ export async function ensureBareClone(repo: string): Promise<{ bareDir: string; 
 
 /** "Refresh" — update every branch head in the bare clone from origin. */
 export async function fetchAll(bareDir: string): Promise<void> {
+  if (isOffline()) throw new Error('offline: remote skills repos are not fetched (CEZ_OFFLINE=0 to allow)');
   const res = await git(
     ['fetch', 'origin', '--prune', '+refs/heads/*:refs/heads/*'],
     CLONE_TIMEOUT_MS,
@@ -673,4 +677,9 @@ async function loadTeamSkills(repoRoot: string, refresh: boolean): Promise<Skill
   // An invalidation during this load means its source list is stale: don't publish it.
   if (generation === teamSkillsGeneration) teamSkillsByRoot.set(repoRoot, out);
   return out;
+}
+
+/** A skills repo on this machine (a path or file:// URL) needs no network. */
+function isLocalRepo(repo: string): boolean {
+  return repo.startsWith('/') || repo.startsWith('./') || repo.startsWith('../') || repo.startsWith('file://');
 }
