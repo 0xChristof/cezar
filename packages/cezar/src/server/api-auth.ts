@@ -22,18 +22,28 @@ export interface ApiAuth {
   cookieName: string;
 }
 
-export interface TaskGrant {
-  runId: string;
-}
+/** A run's agent, or a manager's (whose CLI drives its own workspace routes). */
+export type TaskGrant = { runId: string; managerId?: undefined } | { managerId: string; runId?: undefined };
 
 const taskTokens = new Map<string, TaskGrant>();
 
-/** The run's token (one per run, reused across its spawns); valid until `revokeTaskTokens(runId)`. */
-export function issueTaskToken(runId: string): string {
-  for (const [token, grant] of taskTokens) if (grant.runId === runId) return token;
+function issue(grant: TaskGrant): string {
+  for (const [token, held] of taskTokens) {
+    if (held.runId === grant.runId && held.managerId === grant.managerId) return token;
+  }
   const token = randomBytes(24).toString('base64url');
-  taskTokens.set(token, { runId });
+  taskTokens.set(token, grant);
   return token;
+}
+
+/** The run's token (one per run, reused across its spawns); revoked on its terminal transition. */
+export function issueTaskToken(runId: string): string {
+  return issue({ runId });
+}
+
+/** A manager's token: its own `/workspace/managers/<id>` routes and the workflow lists. */
+export function issueManagerToken(managerId: string): string {
+  return issue({ managerId });
 }
 
 let cockpitToken: string | undefined;
@@ -137,10 +147,15 @@ export function authenticate(auth: ApiAuth, creds: ApiCredentials): ApiCaller | 
  * without the `/p/<project>` scope.
  */
 export function taskRouteAllowed(method: string, path: string, grant: TaskGrant): boolean {
+  const escape = (id: string) => encodeURIComponent(id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (grant.managerId !== undefined) {
+    return new RegExp(`^/api/v1/workspace/managers/${escape(grant.managerId)}(?:/.*)?$`).test(path)
+      || (method === 'GET' && /^\/api\/v1\/p\/[^/]+\/workflows$/.test(path));
+  }
   const m = /^\/api\/v1(?:\/p\/[^/]+)?(\/.*)?$/.exec(path);
   if (!m) return false;
   const rest = m[1] ?? '/';
-  const own = encodeURIComponent(grant.runId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const own = escape(grant.runId);
   const rules: Array<[string, RegExp]> = [
     ['GET', /^\/runs\/?$/],
     ['GET', new RegExp(`^/runs/${own}(?:/.*)?$`)],

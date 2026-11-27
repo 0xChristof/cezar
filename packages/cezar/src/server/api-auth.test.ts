@@ -9,7 +9,10 @@ import { RunStore } from '../runs/store.ts';
 import type { RunManager, StartRunInput } from '../workflows/run.ts';
 import type { WorkflowDef } from '../workflows/types.ts';
 import {
+  issueManagerToken,
   issueTaskToken,
+  revokeTaskTokens,
+  taskGrantOf,
   resetTaskTokensForTests,
   resolveApiAuth,
   sessionCookieName,
@@ -107,6 +110,20 @@ describe('cockpit API authentication (security hardening)', () => {
     expect(enabled.status).toBe(403);
     expect(((await enabled.json()) as { error: string }).error).toContain('paused');
   });
+
+  it('lets an agent preview an automation check but not execute one', async () => {
+    const run = store.createRun({ title: 't', workflow: '(planned)', task: 'x', steps: [] });
+    const task = { 'x-cezar-task-token': issueTaskToken(run.id) };
+    const created = await post('/api/v1/automations', {
+      name: 'Triage', events: ['issue.opened'], intervalSeconds: 300, filters: { lookbackDays: 7, maxRecords: 25 }, task: { prompt: 'Review {{github.url}}' },
+    }, { 'x-cezar-token': auth.token });
+    const body = (await created.json()) as { automation?: { id: string }; error?: string };
+    expect(body.error).toBeUndefined();
+    const id = body.automation?.id;
+    expect(id).toBeTruthy();
+    expect((await post(`/api/v1/automations/${id}/check`, { mode: 'execute' }, task)).status).toBe(403);
+    expect((await post(`/api/v1/automations/${id}/check`, { mode: 'preview' }, task)).status).not.toBe(403);
+  });
 });
 
 describe('taskRouteAllowed', () => {
@@ -177,5 +194,25 @@ describe('cockpit secrets never reach an agent', () => {
     const full = buildChildEnv({ backend: 'claude', source: { ...source, CEZ_AGENT_ENV_FULL: '1' } });
     expect(full.CEZ_API_TOKEN).toBeUndefined();
     expect(buildChildEnv({ backend: 'claude', source, extraEnv: { CEZ_TASK_TOKEN: 'own' } }).CEZ_TASK_TOKEN).toBe('own');
+  });
+});
+
+describe('manager tokens and revocation', () => {
+  it('a manager token reaches only its own workspace routes and the workflow lists', () => {
+    const grant = taskGrantOf(issueManagerToken('m1'))!;
+    expect(taskRouteAllowed('POST', '/api/v1/workspace/managers/m1/tasks', grant)).toBe(true);
+    expect(taskRouteAllowed('GET', '/api/v1/workspace/managers/m1/snapshot', grant)).toBe(true);
+    expect(taskRouteAllowed('GET', '/api/v1/p/proj/workflows', grant)).toBe(true);
+    expect(taskRouteAllowed('GET', '/api/v1/workspace/managers/m2/snapshot', grant)).toBe(false);
+    expect(taskRouteAllowed('PUT', '/api/v1/config', grant)).toBe(false);
+    expect(taskRouteAllowed('POST', '/api/v1/runs', grant)).toBe(false);
+  });
+
+  it('a run\'s token stops working once the run is revoked, and a new one is issued after', () => {
+    const token = issueTaskToken('r-rev');
+    expect(issueTaskToken('r-rev')).toBe(token);
+    revokeTaskTokens('r-rev');
+    expect(taskGrantOf(token)).toBeUndefined();
+    expect(issueTaskToken('r-rev')).not.toBe(token);
   });
 });

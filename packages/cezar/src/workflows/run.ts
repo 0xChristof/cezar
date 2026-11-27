@@ -1,4 +1,4 @@
-import { COCKPIT_SECRET_ENV, issueTaskToken } from '../server/api-auth.ts';
+import { COCKPIT_SECRET_ENV, issueTaskToken, revokeTaskTokens } from '../server/api-auth.ts';
 import type { StepToolPolicy, SwitchRunAgentInput } from '@open-mercato/cezar-contract';
 import { readOnlyEnv } from '../core/read-only-env.ts';
 import { AgentUsageHolds } from '../workspace/agent-usage-holds.ts';
@@ -3196,6 +3196,8 @@ export class RunManager {
     // there is no keep-count to respect and nothing left to recover from it. A
     // Continue (or an auto-resume) re-creates it through `agentEnv`.
     removeAgentTmpDir(this.dataDir, runId);
+    // Its API token too (server/api-auth.ts): a Continue issues a fresh one through `agentEnv`.
+    revokeTaskTokens(runId);
     // Whatever the task started and left running (#1411) — same single terminal hook.
     this.reapLeftoverProcesses([runId], LEFTOVER_SETTLE_GRACE_MS, 'still running after the task settled');
     // Last, so the Continue starts from exactly the state a Continue posted just after the drop would.

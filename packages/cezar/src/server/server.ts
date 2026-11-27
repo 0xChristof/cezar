@@ -5288,6 +5288,10 @@ export function createAppParts(deps: ServerDeps) {
       if (!automation) return c.json({ error: 'not found' }, 404);
       if (!isGithubAutomation(automation) && !isTrackerAutomation(automation)) return c.json({ error: 'Choose an event to preview, or use run for a schedule' }, 409);
       const parsed = { data: c.req.valid('json') };
+      // An agent may preview what an automation would match; launching tasks stays with the person.
+      if (parsed.data.mode === 'execute' && apiCallers.get(c.req.raw)?.kind === 'task') {
+        return c.json({ error: 'forbidden: an agent may only preview an automation check' }, 403);
+      }
       // `string`, not `randomUUID`'s template-literal type: the wire carries an opaque id, and
       // leaking `${string}-${string}-…` into the route type would make the contract describe the
       // generator rather than the answer.
