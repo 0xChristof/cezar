@@ -57,6 +57,10 @@ BUILD_INPUT_PATHS="packages/contract/src packages/contract/package.json packages
 # `claude` login and reaches no network — the whole point for CI/e2e.
 export CEZ_DRY_RUN=1
 
+# The browser specs drive the cockpit API directly; API authentication (server/api-auth.ts) is
+# covered by unit tests and the packaged-CLI e2e instead.
+export CEZ_API_AUTH=0
+
 # The real CLI writes workspace state at boot (~/.cezar migrations + project
 # registration) — pin CEZ_HOME under .ai/qa so a test boot never touches the
 # developer's real ~/.cezar. Kept stable (not per-boot) so the reuse path

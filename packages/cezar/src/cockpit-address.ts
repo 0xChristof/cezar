@@ -22,6 +22,13 @@ export function launchPageUrl(origin: string): string {
   return `${origin.replace(/\/+$/, '')}/p/default/`;
 }
 
+/** A cockpit page that logs the browser in: the server trades `?token=` for its session cookie. */
+export function withCockpitToken(pageUrl: string, token: string): string {
+  const url = new URL(pageUrl);
+  url.searchParams.set('token', token);
+  return url.toString();
+}
+
 export interface MissingCockpitMessage {
   /** The command as typed, e.g. `cez automation`. */
   command: string;

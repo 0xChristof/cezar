@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +18,27 @@ const PLIST_LABEL = 'ai.cezar.ngrok';
 const plistPath = (): string => join(homedir(), 'Library', 'LaunchAgents', `${PLIST_LABEL}.plist`);
 /** The tunnel definition (basic-auth included), `0600`: credentials stay out of argv, which `ps` shows every local user. */
 const tunnelConfigPath = (): string => join(homedir(), 'Library', 'Application Support', 'cezar', 'ngrok-tunnel.yml');
+/**
+ * The hosted cockpit's API token (cezar `server/api-auth.ts`), shared by the cockpit agent
+ * (`CEZ_API_TOKEN_FILE`, the path, never the value) and the tunnel, which adds it to every request that passed basic auth — so a
+ * browser or the iOS app in hosted mode is signed in, while agents on this Mac, which reach the
+ * cockpit on loopback without passing the tunnel, are not. 0600, created once.
+ */
+export const hostedTokenPath = (): string => join(homedir(), 'Library', 'Application Support', 'cezar', 'api-token');
+export function hostedApiToken(path = hostedTokenPath()): string {
+  try {
+    const existing = readFileSync(path, 'utf8').trim();
+    if (/^[0-9a-f]{64}$/.test(existing)) return existing;
+  } catch {
+    // first install
+  }
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const token = randomBytes(32).toString('hex');
+  writeFileSync(path, `${token}\n`, { encoding: 'utf8', mode: 0o600 });
+  chmodSync(path, 0o600);
+  return token;
+}
+
 const NGROK_DEFAULT_CONFIG = (): string => join(homedir(), 'Library', 'Application Support', 'ngrok', 'ngrok.yml');
 const TUNNEL_NAME = 'cezar';
 
@@ -41,7 +63,7 @@ function escapeXml(s: string): string {
 }
 
 /** ngrok tunnel definition for `ngrok start`; JSON strings are valid YAML double-quoted scalars. */
-export function ngrokTunnelConfig(port: number, basicAuth: string, domain?: string): string {
+export function ngrokTunnelConfig(port: number, basicAuth: string, domain?: string, apiToken?: string): string {
   return [
     '# Managed by cezar server-install — do not edit by hand.',
     'version: "3"',
@@ -52,6 +74,7 @@ export function ngrokTunnelConfig(port: number, basicAuth: string, domain?: stri
     ...(domain ? [`    domain: ${JSON.stringify(domain)}`] : []),
     '    basic_auth:',
     `      - ${JSON.stringify(basicAuth)}`,
+    ...(apiToken ? ['    request_header:', '      add:', `        - ${JSON.stringify(`x-cezar-token: ${apiToken}`)}`] : []),
     '',
   ].join('\n');
 }
@@ -169,7 +192,7 @@ const ngrokStep: InstallStep = {
       // create, so chmod too for re-installs over an existing file.
       const tunnelConfig = tunnelConfigPath();
       mkdirSync(dirname(tunnelConfig), { recursive: true, mode: 0o700 });
-      writeFileSync(tunnelConfig, ngrokTunnelConfig(ctx.state.primaryPort, basicAuth, domain), { encoding: 'utf8', mode: 0o600 });
+      writeFileSync(tunnelConfig, ngrokTunnelConfig(ctx.state.primaryPort, basicAuth, domain, hostedApiToken()), { encoding: 'utf8', mode: 0o600 });
       chmodSync(tunnelConfig, 0o600);
       const valid = await ctx.runner.capture('ngrok', ['config', 'check', '--config', ngrokConfig, '--config', tunnelConfig]);
       if (valid.code !== 0) throw new StepAborted(`ngrok rejected the tunnel config ${tunnelConfig}: ${valid.stderr.trim() || valid.stdout.trim()}`);
@@ -261,7 +284,7 @@ async function resolveCezarArgv(ctx: InstallContext): Promise<string[]> {
 }
 
 /** launchd agent that keeps the cezar cockpit running on the given port. */
-export function cezarLaunchdPlist(repoRoot: string, port: number, argv: string[], instanceId?: string): string {
+export function cezarLaunchdPlist(repoRoot: string, port: number, argv: string[], instanceId?: string, apiTokenFile?: string): string {
   // Give the agent the operator's PATH so cezar can spawn claude/gh/codex.
   const pathDirs = [dirname(process.execPath), ...(process.env.PATH ?? '').split(':'), '/usr/local/bin', '/usr/bin', '/bin']
     .filter((d, i, a) => d && d !== '.' && a.indexOf(d) === i);
@@ -284,7 +307,7 @@ ${argXml}
     <dict>
       <key>CEZ_REMOTE</key>
       <string>1</string>
-${instanceId ? `      <key>CEZ_INSTANCE_ID</key>\n      <string>${escapeXml(instanceId)}</string>\n` : ''}      <key>PATH</key>
+${instanceId ? `      <key>CEZ_INSTANCE_ID</key>\n      <string>${escapeXml(instanceId)}</string>\n` : ''}${apiTokenFile ? `      <key>CEZ_API_TOKEN_FILE</key>\n      <string>${escapeXml(apiTokenFile)}</string>\n` : ''}      <key>PATH</key>
       <string>${escapeXml(pathDirs.join(':'))}</string>
     </dict>
     <key>RunAtLoad</key>
@@ -310,7 +333,8 @@ const autostartStep: InstallStep = {
       ctx.ui.info(`DRY RUN — would write ${path} and launchctl bootstrap it.`);
     } else {
       mkdirSync(join(homedir(), 'Library', 'LaunchAgents'), { recursive: true });
-      writeFileSync(path, cezarLaunchdPlist(ctx.repoRoot, ctx.state.primaryPort, argv, ctx.state.instanceId), { encoding: 'utf8', mode: 0o600 });
+      hostedApiToken(); // created before the agent first reads it
+      writeFileSync(path, cezarLaunchdPlist(ctx.repoRoot, ctx.state.primaryPort, argv, ctx.state.instanceId, hostedTokenPath()), { encoding: 'utf8', mode: 0o600 });
       chmodSync(path, 0o600);
       const uid = process.getuid ? process.getuid() : 0;
       await ctx.runner.capture('launchctl', ['bootout', `gui/${uid}/${CEZAR_PLIST_LABEL}`]);

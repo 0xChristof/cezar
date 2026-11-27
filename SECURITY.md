@@ -39,7 +39,8 @@ the issue publicly. We will coordinate the disclosure date with you.
 ## Scope
 
 cezar is a local tool: the server binds to `127.0.0.1` and state lives in plain
-files under `.ai/cezar/` and `~/.cezar/`. Reports we are especially interested in:
+files under `.ai/cezar/` and `~/.cezar/`. Its API requires a token (the link cezar prints at start, `cez open`),
+so processes on this machine, including the agents cezar runs, cannot drive it. Reports we are especially interested in:
 
 - ways for a web page, another local user or a remote host to reach or drive
   the cockpit API (DNS rebinding, CSRF, origin-guard bypasses, WebSocket abuse),

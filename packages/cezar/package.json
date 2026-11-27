@@ -44,6 +44,7 @@
     "postbuild": "node scripts/inline-contract.mjs"
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.83",
     "@clack/prompts": "^0.11.0",
     "@hono/node-server": "^2.1.3",
     "dotenv": "^16.6.1",

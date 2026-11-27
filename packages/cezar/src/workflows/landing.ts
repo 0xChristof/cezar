@@ -1,3 +1,4 @@
+import { prepareCheckSandbox } from './check-sandbox.ts';
 import { execFile } from 'node:child_process';
 import { signalCheck, spawnCheck } from './check-process.ts';
 import { CEZAR_DATA_EXCLUDE } from '../data-gitignore.ts';
@@ -57,7 +58,8 @@ const reason = (res: GitResult, fallback: string) =>
 
 export function runShellCheck(command: string, cwd: string, env?: NodeJS.ProcessEnv): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolve) => {
-    const child = spawnCheck(command, cwd, env ?? process.env);
+    const checkEnv = env ?? process.env;
+    const child = spawnCheck(command, cwd, checkEnv, prepareCheckSandbox(cwd, checkEnv));
     let output = '';
     const collect = (chunk: Buffer) => {
       output = (output + chunk.toString('utf8')).slice(-CHECK_OUTPUT_TAIL);

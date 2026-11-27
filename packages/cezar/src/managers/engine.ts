@@ -1,3 +1,4 @@
+import { cockpitApiToken, issueManagerToken } from '../server/api-auth.ts';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, writeFileSync } from 'node:fs';
 import { delimiter, join, resolve } from 'node:path';
@@ -2539,6 +2540,8 @@ export class ManagerEngine {
         ...(runner === 'claude' ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {}),
         ...(manager.bashAllow?.length ? { [MANAGER_BASH_ALLOW_ENV]: JSON.stringify(manager.bashAllow) } : {}),
         ...(apiUrl ? { CEZ_API_URL: apiUrl } : {}),
+        // `cez-manager` drives this manager's own workspace routes (server/api-auth.ts).
+        ...(apiUrl && cockpitApiToken() ? { CEZ_TASK_TOKEN: issueManagerToken(id) } : {}),
         ...(process.env.CEZ_BIN ? { CEZ_BIN: process.env.CEZ_BIN } : {}),
         ...(shimDir ? { PATH: `${shimDir}${delimiter}${process.env.PATH ?? ''}` } : {}),
         ...(readOnlyWatch ? readOnlyEnv() : {}),
@@ -3261,7 +3264,12 @@ export class ManagerEngine {
   private async forward(path: string, init?: { method: string; body?: unknown }): Promise<Response> {
     return this.deps.request(`/api/v1${path}`, {
       method: init?.method ?? 'GET',
-      headers: { host: '127.0.0.1', ...(init?.body !== undefined ? { 'content-type': 'application/json' } : {}) },
+      headers: {
+        host: '127.0.0.1',
+        // In-process, on the manager engine's own behalf (server/api-auth.ts).
+        ...((token): Record<string, string> => (token ? { 'x-cezar-token': token } : {}))(cockpitApiToken()),
+        ...(init?.body !== undefined ? { 'content-type': 'application/json' } : {}),
+      },
       ...(init?.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
     });
   }

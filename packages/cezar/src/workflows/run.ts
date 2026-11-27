@@ -1,3 +1,5 @@
+import { prepareCheckSandbox } from './check-sandbox.ts';
+import { COCKPIT_SECRET_ENV, issueTaskToken, revokeTaskTokens } from '../server/api-auth.ts';
 import type { StepToolPolicy, SwitchRunAgentInput } from '@open-mercato/cezar-contract';
 import { readOnlyEnv } from '../core/read-only-env.ts';
 import { AgentUsageHolds } from '../workspace/agent-usage-holds.ts';
@@ -2093,6 +2095,8 @@ export class RunManager {
       // which project the run belongs to. Absent (not empty) while the feature is off, so the env
       // is byte-for-byte as before.
       ...(apiUrl ? { CEZ_API_URL: apiUrl } : {}),
+      // Scoped to this run's own routes (server/api-auth.ts `taskRouteAllowed`), never the cockpit token.
+      ...(apiUrl ? { CEZ_TASK_TOKEN: issueTaskToken(runId, this.projectId) } : {}),
       ...(apiUrl && this.projectId ? { CEZ_PROJECT_ID: this.projectId } : {}),
       // The cockpit's OWN entrypoint, so an agent runs `node "$CEZ_BIN" task …` and never an older
       // `cez` that happens to be on its PATH without the command (observed on the first live run).
@@ -2236,7 +2240,7 @@ export class RunManager {
         grant.tokens.add(capability);
         this.trackerCapabilities.set(runId, grant);
         this.store.registerRunSecrets(runId, [capability]);
-        Object.assign(trackerEnv, { CEZ_TRACKER_CAPABILITY: capability, CEZ_API_URL: process.env.CEZ_API_URL!, CEZ_BIN: process.env.CEZ_BIN!, CEZ_TASK_ID: runId, ...(this.projectId ? { CEZ_PROJECT_ID: this.projectId } : {}) });
+        Object.assign(trackerEnv, { CEZ_TRACKER_CAPABILITY: capability, CEZ_API_URL: process.env.CEZ_API_URL!, CEZ_TASK_TOKEN: issueTaskToken(runId, this.projectId), CEZ_BIN: process.env.CEZ_BIN!, CEZ_TASK_ID: runId, ...(this.projectId ? { CEZ_PROJECT_ID: this.projectId } : {}) });
       }
       trackerContext = trackerPrompt({ binding, ...(context && contextFile ? { context, contextFile } : {}), ...(unavailable ? { unavailable } : {}), commands });
     }
@@ -3193,6 +3197,8 @@ export class RunManager {
     // there is no keep-count to respect and nothing left to recover from it. A
     // Continue (or an auto-resume) re-creates it through `agentEnv`.
     removeAgentTmpDir(this.dataDir, runId);
+    // Its API token too (server/api-auth.ts): a Continue issues a fresh one through `agentEnv`.
+    revokeTaskTokens(runId);
     // Whatever the task started and left running (#1411) — same single terminal hook.
     this.reapLeftoverProcesses([runId], LEFTOVER_SETTLE_GRACE_MS, 'still running after the task settled');
     // Last, so the Continue starts from exactly the state a Continue posted just after the drop would.
@@ -10539,7 +10545,9 @@ export class RunManager {
       type: 'note',
       message: `auto-land — committing, rebasing${policy.checks.length ? ', running required checks' : ''} and pushing`,
     });
-    const env = { ...process.env, ...this.agentEnv(runId) };
+    const env: NodeJS.ProcessEnv = { ...process.env, ...this.agentEnv(runId) };
+    // Required landing checks run agent-written code: no cockpit authority (server/api-auth.ts).
+    for (const name of Object.keys(env)) if (COCKPIT_SECRET_ENV.includes(name.toUpperCase())) delete env[name];
     const outcome = await landInPlace(this.repoRoot, {
       // From the staged change itself: the title names the first request and goes stale.
       describe: async (staged) => {
@@ -11570,6 +11578,8 @@ export class RunManager {
     // Match case-insensitively as agent env filtering does (and Windows requires).
     for (const name of Object.keys(base)) {
       if (name.toUpperCase() === 'CEZ_TRACKER_CAPABILITY') delete base[name];
+      // Nor does cockpit API authority: a check runs code the agent may have written.
+      if (COCKPIT_SECRET_ENV.includes(name.toUpperCase())) delete base[name];
     }
     for (const name of CHECK_CONTEXT_VARS) {
       // `CEZ_PROJECT_ID` is the one context name that is ALSO a documented CLI input
@@ -11654,7 +11664,7 @@ export class RunManager {
     if (state.cancelled) return { ok: false, output: 'cancelled', exitCode: -1, recordedTests };
     return new Promise((resolve) => {
       // Check steps run in the same cwd as the agent steps — the worktree.
-      const child = spawnCheck(command, state.cwd, env);
+      const child = spawnCheck(command, state.cwd, env, prepareCheckSandbox(state.cwd, env));
       state.interrupt = () => signalCheck(child, 'SIGTERM');
 
       let output = '';

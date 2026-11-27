@@ -10,15 +10,32 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { hasSignallablePid } from '../core/child-kill-guard.ts';
+import { sandboxedCheckArgv, type CheckSandbox } from './check-sandbox.ts';
+import { COCKPIT_SECRET_ENV } from '../server/api-auth.ts';
 
 const CHECK_GROUPS = process.platform !== 'win32';
 const liveChecks = new Set<ChildProcessWithoutNullStreams>();
 let exitHookInstalled = false;
 
-export function spawnCheck(command: string, cwd: string, env: NodeJS.ProcessEnv): ChildProcessWithoutNullStreams {
-  const child = spawn('bash', ['-lc', command], { cwd, env, detached: CHECK_GROUPS });
+/**
+ * `sandbox` (workflows/check-sandbox.ts) runs the check under `srt`; when `srt` cannot be found the
+ * check fails rather than running unsandboxed.
+ */
+export function spawnCheck(command: string, cwd: string, rawEnv: NodeJS.ProcessEnv, sandbox?: CheckSandbox): ChildProcessWithoutNullStreams {
+  // Whatever the caller built, a check never carries cockpit API authority (server/api-auth.ts).
+  const env = Object.fromEntries(Object.entries(rawEnv).filter(([name]) => !COCKPIT_SECRET_ENV.includes(name.toUpperCase())));
+  const wrapped = sandbox ? sandboxedCheckArgv(command, sandbox) : undefined;
+  const child = sandbox && !wrapped
+    ? spawn('bash', ['-c', 'echo "cezar: the check sandbox (@anthropic-ai/sandbox-runtime) is not installed; set CEZ_CHECK_SANDBOX=0 to run checks unsandboxed" >&2; exit 126'], { cwd, env, detached: CHECK_GROUPS })
+    : wrapped
+      ? spawn(process.execPath, wrapped.args, { cwd, env, detached: CHECK_GROUPS })
+      : spawn('bash', ['-lc', command], { cwd, env, detached: CHECK_GROUPS });
   liveChecks.add(child);
-  const forget = () => liveChecks.delete(child);
+  const forget = () => {
+    liveChecks.delete(child);
+    wrapped?.cleanup();
+    sandbox?.cleanup();
+  };
   child.once('close', forget);
   child.once('error', forget);
   // In its own group a check no longer hears the terminal's Ctrl-C, so the cockpit's exit ends it.
