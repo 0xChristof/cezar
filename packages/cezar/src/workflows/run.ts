@@ -1,3 +1,4 @@
+import { prepareCheckSandbox } from './check-sandbox.ts';
 import { COCKPIT_SECRET_ENV, issueTaskToken, revokeTaskTokens } from '../server/api-auth.ts';
 import type { StepToolPolicy, SwitchRunAgentInput } from '@open-mercato/cezar-contract';
 import { readOnlyEnv } from '../core/read-only-env.ts';
@@ -11661,7 +11662,7 @@ export class RunManager {
     if (state.cancelled) return { ok: false, output: 'cancelled', exitCode: -1, recordedTests };
     return new Promise((resolve) => {
       // Check steps run in the same cwd as the agent steps — the worktree.
-      const child = spawnCheck(command, state.cwd, env);
+      const child = spawnCheck(command, state.cwd, env, prepareCheckSandbox(state.cwd, env));
       state.interrupt = () => signalCheck(child, 'SIGTERM');
 
       let output = '';

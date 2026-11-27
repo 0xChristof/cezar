@@ -10,6 +10,11 @@ import { guardChildProcessKill } from './src/core/child-kill-guard.ts'
 // (src/core/child-kill-guard.ts). The cockpit installs the same guard at boot.
 guardChildProcessKill()
 
+// Check steps run under the OS sandbox by default (src/workflows/check-sandbox.ts). The suites that
+// spawn checks assert check semantics, not the sandbox, and CI Linux may lack bubblewrap; the
+// sandbox has its own tests that turn it back on.
+process.env.CEZ_CHECK_SANDBOX ??= '0'
+
 // Inside a cezar task TMP is `<repo>/.ai/cezar/tmp/<run>` — the user's own checkout. Cases that
 // take a fresh `tmpdir()` folder for "outside any repo" then ran git there: `commitAll` committed
 // the user's dirty files and a landing path pushed HEAD to their remote. So before anything else
