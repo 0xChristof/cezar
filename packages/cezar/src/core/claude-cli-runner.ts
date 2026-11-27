@@ -490,7 +490,10 @@ export function buildClaudeArgs(
       args.push('--session-id', spec.sessionId);
     }
   }
-  const allowed = buildAllowedTools(spec.allowedTools ?? [], spec.bashAllowlist);
+  const built = buildAllowedTools(spec.allowedTools ?? [], spec.bashAllowlist);
+  // The OS sandbox fences Bash only: a bare Write/Edit grant would still write anywhere (a shell rc
+  // file, the main checkout's .ai/cezar/workflows that cezar runs unsandboxed). Scope it to the run.
+  const allowed = claudeSandboxSettings(env) ? scopeFileWrites(built, spec) : built;
   const artifactsRule = claudeArtifactsWriteRule(spec);
   if (artifactsRule) allowed.push(artifactsRule);
   // Private MCP servers (spec 2026-10-07-private-project-mcp): `--mcp-config` ADDS to the repo's
@@ -671,6 +674,31 @@ export function claudeArtifactsWriteRule(spec: Pick<AgentRunSpec, 'artifactsWrit
   // Absolute POSIX paths only, and nothing a rule would read as a glob or end its specifier with.
   if (!dir.startsWith('/') || /[*?[\](),\n]/.test(dir)) return undefined;
   return `Edit(/${dir.replace(/\/+$/, '')}/**)`;
+}
+
+const FILE_WRITE_TOOLS: ReadonlySet<string> = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+
+/**
+ * Replace bare file-writing grants with `Edit(//<root>/**)` rules (Claude applies Edit rules to
+ * every file-writing tool) over what the run owns: its worktree, `--add-dir` dirs, artifacts dir,
+ * TMPDIR and its handoff / todos files. Under `dontAsk` every other path is denied. A path a rule
+ * cannot express is dropped, never widened.
+ */
+export function scopeFileWrites(
+  allowed: readonly string[],
+  spec: Pick<AgentRunSpec, 'cwd' | 'env' | 'additionalDirectories' | 'artifactsWriteDir'>,
+): string[] {
+  if (!allowed.some((t) => FILE_WRITE_TOOLS.has(t))) return [...allowed];
+  const expressible = (p: string | undefined): p is string => !!p && p.startsWith('/') && !/[*?[\](),\n]/.test(p);
+  const dirs = [spec.cwd, ...(spec.additionalDirectories ?? []), spec.artifactsWriteDir, spec.env?.TMPDIR].filter(expressible);
+  const files = [spec.env?.CEZ_HANDOFF_FILE, spec.env?.CEZ_TODOS_FILE].filter(expressible);
+  const rules = [
+    ...new Set([
+      ...dirs.map((d) => `Edit(/${d.replace(/\/+$/, '')}/**)`),
+      ...files.map((f) => `Edit(/${f})`),
+    ]),
+  ];
+  return [...allowed.filter((t) => !FILE_WRITE_TOOLS.has(t)), ...rules];
 }
 
 /** `Edit(//<path>)` deny rules — Claude applies Edit rules to every file-writing tool. A path a

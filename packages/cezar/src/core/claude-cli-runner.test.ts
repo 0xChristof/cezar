@@ -20,6 +20,7 @@ import {
   writeClaudeSettingsFile,
   withClaudeSandbox,
   sandboxRunOf,
+  scopeFileWrites,
   EOF_KILL_GRACE_MS,
   EOF_TERM_GRACE_MS,
   KILL_GRACE_MS,
@@ -913,5 +914,37 @@ describe('secret files (.env, keys) and the run\'s own roots under the sandbox',
     expect(run.projectRoots).toEqual(['/home/dev/code/app']);
     expect(run.readableRoots).toEqual(expect.arrayContaining(['/home/dev/code/app/.ai/cezar/worktrees/r1', '/home/dev/code/app/.git', '/home/dev/code/app/.ai/cezar/runs']));
     expect(run.tempDirs).toEqual(['/t/r1']);
+  });
+});
+
+describe('file-writing tools are scoped to the run under the sandbox', () => {
+  const spec = {
+    cwd: '/repo/.ai/cezar/worktrees/r1',
+    additionalDirectories: ['/repo/.ai/cezar/runs'],
+    artifactsWriteDir: '/repo/.ai/cezar/artifacts/r1',
+    env: { TMPDIR: '/t/r1', CEZ_HANDOFF_FILE: '/repo/.ai/cezar/runs/r1.handoff.md', CEZ_TODOS_FILE: '/repo/.ai/cezar/todos.json' },
+  };
+
+  it('replaces bare Write/Edit grants with rules over the run\'s own paths only', () => {
+    const scoped = scopeFileWrites(['Read', 'Edit', 'Write', 'Bash'], spec);
+    expect(scoped).toEqual(['Read', 'Bash',
+      'Edit(//repo/.ai/cezar/worktrees/r1/**)', 'Edit(//repo/.ai/cezar/runs/**)', 'Edit(//repo/.ai/cezar/artifacts/r1/**)', 'Edit(//t/r1/**)',
+      'Edit(//repo/.ai/cezar/runs/r1.handoff.md)', 'Edit(//repo/.ai/cezar/todos.json)']);
+    expect(scoped.join(',')).not.toContain('Edit(//repo/**)');
+  });
+
+  it('leaves a grant without file-writing tools alone and drops inexpressible paths', () => {
+    expect(scopeFileWrites(['Read', 'Bash(git status:*)'], spec)).toEqual(['Read', 'Bash(git status:*)']);
+    expect(scopeFileWrites(['Write'], { cwd: '/odd(dir)', env: {} })).toEqual([]);
+  });
+
+  it('applies only while the sandbox is on', () => {
+    const args = (env: NodeJS.ProcessEnv) => {
+      const a = buildClaudeArgs({ userPrompt: 'go', allowedTools: ['Read', 'Write'], ...spec }, env);
+      return a[a.indexOf('--allowedTools') + 1]!;
+    };
+    expect(args({ HOME: '/home/dev' })).toContain('Edit(//repo/.ai/cezar/worktrees/r1/**)');
+    expect(args({ HOME: '/home/dev' }).split(',')).not.toContain('Write');
+    expect(args({ CEZ_AGENT_SANDBOX: '0' }).split(',')).toContain('Write');
   });
 });
