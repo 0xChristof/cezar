@@ -82,6 +82,12 @@ Your choice is remembered for the rest of the run.
 
 ---
 
+
+> **Agent sandbox on Linux.** Claude Code's Bash sandbox (on by default, `CEZ_AGENT_SANDBOX`) needs
+> `bubblewrap` and `socat`: `sudo apt-get install -y bubblewrap socat`. Without them a Claude step
+> that may use Bash fails instead of running unsandboxed (Bash-free steps still run); set
+> `CEZ_AGENT_SANDBOX=0` only if you accept unsandboxed agents.
+
 ## The box already has a reverse proxy (Dokploy, Coolify, Caddy…)
 
 The default install above assumes cezar owns the HTTP front. If something else

@@ -989,3 +989,14 @@ describe('runs that live under cezar\'s home stay usable (review checkouts, mana
     expect(denied('false')).toBe(true);
   });
 });
+
+describe('a Bash-free run needs no OS sandbox', () => {
+  it('keeps the read-deny rules but requires no sandbox when Bash is not granted', () => {
+    const noBash = buildClaudeArgs({ userPrompt: 'go', cwd: '/repo', allowedTools: ['Read', 'Grep'] }, { HOME: '/home/dev' });
+    const settings = JSON.parse(noBash[noBash.indexOf('--settings') + 1]!) as Record<string, unknown>;
+    expect(settings).not.toHaveProperty('sandbox');
+    expect(JSON.stringify(settings)).toContain('/.ssh/**)');
+    const withBash = buildClaudeArgs({ userPrompt: 'go', cwd: '/repo', allowedTools: ['Read', 'Bash'] }, { HOME: '/home/dev' });
+    expect(JSON.parse(withBash[withBash.indexOf('--settings') + 1]!)).toHaveProperty('sandbox.failIfUnavailable', true);
+  });
+});

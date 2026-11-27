@@ -559,13 +559,20 @@ export interface ClaudeSandboxRun {
   projectRoots?: readonly string[];
   readableRoots?: readonly string[];
   binRoots?: readonly string[];
+  /** Whether the run may use Bash. Without it only the permission rules apply: no OS sandbox to
+   *  require, so a host without one (Linux missing bubblewrap) still runs a Bash-free step. */
+  bash?: boolean;
 }
 
 /** What the sandbox must know about this run: its own files outside the worktree that its shell
  *  writes (#2115 hands claude the dirs), its TMPDIR, the project and what it must keep reading. */
-export function sandboxRunOf(spec: Pick<AgentRunSpec, 'cwd' | 'env' | 'additionalDirectories' | 'artifactsWriteDir'>, env: NodeJS.ProcessEnv): ClaudeSandboxRun {
+export function sandboxRunOf(
+  spec: Pick<AgentRunSpec, 'cwd' | 'env' | 'additionalDirectories' | 'artifactsWriteDir' | 'allowedTools' | 'bashAllowlist'>,
+  env: NodeJS.ProcessEnv,
+): ClaudeSandboxRun {
   const project = projectRootOf(spec.cwd);
   return {
+    bash: buildAllowedTools(spec.allowedTools ?? [], spec.bashAllowlist).some((rule) => rule === 'Bash' || rule.startsWith('Bash(')),
     runFiles: [spec.env?.CEZ_HANDOFF_FILE, spec.env?.CEZ_TODOS_FILE].filter((p): p is string => Boolean(p)),
     tempDirs: spec.env?.TMPDIR ? [spec.env.TMPDIR] : [],
     projectRoots: [project],
@@ -593,10 +600,12 @@ export function withClaudeSandbox(
   };
   const permissions = own('permissions');
   const deny = Array.isArray(permissions.deny) ? permissions.deny : [];
+  const merged = { ...permissions, deny: [...deny, ...os.permissions.deny] };
+  if (run.bash === false) return { ...settings, permissions: merged };
   return {
     ...settings,
     sandbox: { ...os.sandbox, ...own('sandbox') },
-    permissions: { ...permissions, deny: [...deny, ...os.permissions.deny] },
+    permissions: merged,
   };
 }
 
